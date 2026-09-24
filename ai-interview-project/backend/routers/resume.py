@@ -1,0 +1,63 @@
+"""POST /api/resume/upload"""
+import os
+import json
+import time
+import random
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+
+from config.db import get_connection
+from services.resume_parser import extract_text_from_file
+from services.groq_service import extract_resume_data
+
+router = APIRouter()
+
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+ALLOWED_EXTENSIONS = {".pdf", ".docx"}
+
+
+@router.post("/upload")
+async def upload_resume(resume: UploadFile = File(...), name: str = Form(None), email: str = Form(None)):
+    ext = os.path.splitext(resume.filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Only .pdf and .docx files are allowed for resumes.")
+
+    # Save to a unique temp path, same pattern as the Node version.
+    unique_name = f"{int(time.time() * 1000)}-{random.randint(0, 10**9)}{ext}"
+    file_path = os.path.join(UPLOAD_DIR, unique_name)
+
+    contents = await resume.read()
+    if len(contents) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Resume file is too large (max 10MB).")
+
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    conn = None
+    try:
+        raw_text = extract_text_from_file(file_path)
+        parsed = extract_resume_data(raw_text)
+
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO candidates (name, email, resume_filename, resume_raw_text, parsed_resume)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (parsed.get("name") or name, email, resume.filename, raw_text, json.dumps(parsed)),
+        )
+        conn.commit()
+        candidate_id = cursor.lastrowid
+        cursor.close()
+
+        return {"candidateId": candidate_id, "parsedResume": parsed}
+    except ValueError as err:
+        raise HTTPException(status_code=500, detail=str(err))
+    except Exception as err:
+        print(f"[resume/upload] error: {err}")
+        raise HTTPException(status_code=500, detail=str(err) or "Failed to process resume.")
+    finally:
+        if conn is not None:
+            conn.close()
+        if os.path.exists(file_path):
+            os.remove(file_path)
