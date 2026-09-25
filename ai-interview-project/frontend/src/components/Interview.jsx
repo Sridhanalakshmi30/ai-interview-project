@@ -26,13 +26,14 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
   const [questionText, setQuestionText] = useState('');
   const [remainingSeconds, setRemainingSeconds] = useState(0);
   const [typedAnswer, setTypedAnswer] = useState('');
-  const [isRecording, setIsRecording] = useState(false);
-  const [audioBlob, setAudioBlob] = useState(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(true);
   const [lastTranscript, setLastTranscript] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
+  const recognitionRef = useRef(null);
+  const isSpeakingRef = useRef(false);
+  const baseTextRef = useRef('');
   const timerRef = useRef(null);
 
   // Start the interview once when the component mounts.
@@ -69,65 +70,118 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
     return () => clearInterval(timerRef.current);
   }, [loading, sessionId]);
 
-  async function startRecording() {
+  // Cleanup speech recognition on unmount
+  useEffect(() => {
+    return () => {
+      isSpeakingRef.current = false;
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          // ignore
+        }
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
+
+  function startSpeaking() {
     setError('');
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setSpeechSupported(false);
+      setError('Speech recognition is not supported in this browser. You can type your answer instead.');
+      return;
+    }
+
+    setSpeechSupported(true);
+    baseTextRef.current = typedAnswer ? typedAnswer.trim() + ' ' : '';
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    recognition.onresult = (event) => {
+      let interim = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          baseTextRef.current += transcript + ' ';
+        } else {
+          interim += transcript;
+        }
+      }
+      setTypedAnswer(baseTextRef.current + interim);
+    };
+
+    recognition.onerror = (event) => {
+      if (event.error === 'not-allowed') {
+        setError('Microphone access was denied. Please allow microphone permissions or type your answer.');
+        stopSpeaking();
+      } else {
+        console.warn('Speech recognition error:', event.error);
+      }
+    };
+
+    recognition.onend = () => {
+      // Auto-restart if user has not explicitly stopped speaking
+      if (isSpeakingRef.current) {
+        try {
+          recognition.start();
+        } catch (e) {
+          // ignore if already running
+        }
+      }
+    };
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-          sampleRate: 48000,
-        },
-      });
-
-      const preferredMimeType = ['audio/webm;codecs=opus', 'audio/webm'].find((type) =>
-        MediaRecorder.isTypeSupported(type)
-      );
-      const recorder = new MediaRecorder(stream, {
-        ...(preferredMimeType ? { mimeType: preferredMimeType } : {}),
-        audioBitsPerSecond: 128000,
-      });
-
-      audioChunksRef.current = [];
-      recorder.ondataavailable = (e) => audioChunksRef.current.push(e.data);
-      recorder.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: preferredMimeType || 'audio/webm' });
-        setAudioBlob(blob);
-        stream.getTracks().forEach((track) => track.stop());
-      };
-      recorder.start();
-      mediaRecorderRef.current = recorder;
-      setIsRecording(true);
+      recognition.start();
+      recognitionRef.current = recognition;
+      isSpeakingRef.current = true;
+      setIsSpeaking(true);
     } catch (err) {
-      setError('Microphone access was denied or is unavailable. You can type your answer instead.');
+      console.warn('Could not start speech recognition:', err);
+      setError('Could not access speech recognition. You can type your answer instead.');
     }
   }
 
-  function stopRecording() {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
+  function stopSpeaking() {
+    isSpeakingRef.current = false;
+    if (recognitionRef.current) {
+      const rec = recognitionRef.current;
+      recognitionRef.current = null;
+      try {
+        rec.stop();
+      } catch (e) {
+        // ignore
+      }
     }
+    setIsSpeaking(false);
+    setTypedAnswer((prev) => prev.trim());
   }
 
   async function handleSubmitAnswer() {
-    if (!typedAnswer.trim() && !audioBlob) {
-      setError('Please type an answer or record your voice before submitting.');
+    if (isSpeakingRef.current) {
+      stopSpeaking();
+    }
+
+    const answer = typedAnswer.trim();
+    if (!answer) {
+      setError('Please type an answer or speak before submitting.');
       return;
     }
+
     setSubmitting(true);
     setError('');
     try {
       const result = await submitAnswer(sessionId, turnId, {
-        answerText: typedAnswer.trim(),
-        audioBlob
+        answerText: answer,
       });
 
-      setLastTranscript(result.transcript);
+      setLastTranscript(result.transcript || answer);
       setTypedAnswer('');
-      setAudioBlob(null);
+      baseTextRef.current = '';
 
       if (result.finished) {
         onFinished(sessionId);
@@ -181,27 +235,30 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
       )}
 
       <div className="answer-section">
-        <label htmlFor="answer">Type your answer</label>
+        <label htmlFor="answer">Type or speak your answer</label>
         <textarea
           id="answer"
           rows={4}
+          className={isSpeaking ? 'listening' : ''}
           value={typedAnswer}
-          onChange={(e) => setTypedAnswer(e.target.value)}
-          placeholder="Type here, or use the microphone below instead…"
+          onChange={(e) => {
+            setTypedAnswer(e.target.value);
+            baseTextRef.current = e.target.value;
+          }}
+          placeholder="Type here, or click Speak answer below…"
           disabled={submitting}
         />
 
         <div className="voice-controls">
-          {!isRecording ? (
-            <button type="button" className="secondary-btn" onClick={startRecording} disabled={submitting}>
-              🎤 Record voice answer
+          {!isSpeaking ? (
+            <button type="button" className="secondary-btn" onClick={startSpeaking} disabled={submitting}>
+              🎤 Speak answer
             </button>
           ) : (
-            <button type="button" className="secondary-btn recording" onClick={stopRecording}>
-              ⏹ Stop recording
+            <button type="button" className="secondary-btn recording" onClick={stopSpeaking}>
+              ⏹ Stop speaking
             </button>
           )}
-          {audioBlob && !isRecording && <span className="file-chip">Voice answer recorded ✓</span>}
         </div>
 
         {error && <p className="error-text">{error}</p>}

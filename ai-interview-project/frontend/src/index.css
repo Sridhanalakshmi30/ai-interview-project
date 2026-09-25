@@ -170,6 +170,11 @@ textarea {
   gap: 0.75rem;
 }
 
+.answer-section textarea.listening {
+  border-color: #e0a800;
+  box-shadow: 0 0 0 2px rgba(224, 168, 0, 0.15);
+}
+
 .overall-score {
   text-align: center;
   margin: 1rem 0;

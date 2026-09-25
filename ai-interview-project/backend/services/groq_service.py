@@ -80,7 +80,11 @@ Return JSON in exactly this shape:
   "difficulty_start": "easy"|"medium"|"hard",
   "estimated_questions": number
 }}
-Pick 3 to 6 topics maximum, prioritizing the candidate's strongest and most recent projects/internships and their listed technical skills.
+Pick 5 to 8 topics total. The interview will ask about 10 questions on "technical_skill" topics and
+about 5 questions split across "internship" and "project" topics, so make sure the plan includes AT LEAST
+3 distinct "technical_skill" topics (covering different skills/languages/tools from the resume) AND
+AT LEAST 2 distinct "internship" or "project" topics (their most substantial/recent ones) — as long as
+the resume actually contains that information; never invent internships or projects that aren't listed.
 estimated_questions should be reasonable for a {duration_minutes}-minute interview (assume ~2 minutes per question including thinking time)."""
 
     return _call_groq_json(
@@ -96,6 +100,8 @@ def generate_next_question(parsed_resume: dict, plan: dict, history: list, curre
     system_prompt = """You are a friendly, professional AI technical interviewer speaking directly to the candidate.
 Ask exactly ONE clear, natural-sounding interview question at a time, based on the candidate's resume.
 Only ask about: their technical skills, their internships, or their projects — nothing else (no personal questions, no company confidential prompts).
+You MUST ask about the exact topic given to you as "Current topic to focus on" below — do not switch to a
+different topic or category on your own; the topic selection is already decided by the interview logic.
 Keep the question concise (1-3 sentences), conversational, and easy to understand out loud.
 Do not repeat a question already asked. Build naturally on the candidate's previous answers when relevant.
 Return JSON in exactly this shape:

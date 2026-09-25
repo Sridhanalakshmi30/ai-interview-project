@@ -24,7 +24,9 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 DEFAULT_DURATION = int(os.getenv("INTERVIEW_DURATION_MINUTES", "15"))
-MAX_QUESTIONS = int(os.getenv("MAX_QUESTIONS", "12"))
+MAX_QUESTIONS = int(os.getenv("MAX_QUESTIONS", "15"))
+TECHNICAL_QUESTION_TARGET = int(os.getenv("TECHNICAL_QUESTION_TARGET", "10"))
+PROJECT_INTERNSHIP_TARGET = int(os.getenv("PROJECT_INTERNSHIP_TARGET", "5"))
 
 
 class StartInterviewRequest(BaseModel):
@@ -69,15 +71,72 @@ def get_session(session_id: int) -> dict:
         conn.close()
 
 
-def pick_next_topic(plan: dict, current_index: int, decision: str) -> dict:
+def _topic_type_map(plan: dict) -> dict:
+    return {t["name"]: t.get("type", "technical_skill") for t in (plan.get("topics", []) if plan else [])}
+
+
+def _category_counts(plan: dict, history_rows: list) -> dict:
+    """Count how many ANSWERED questions so far were technical_skill vs internship/project,
+    by looking up each answered turn's topic against the plan's topic->type mapping."""
+    type_map = _topic_type_map(plan)
+    counts = {"technical_skill": 0, "internship_or_project": 0}
+    for row in history_rows:
+        row_type = type_map.get(row["topic"], "technical_skill")
+        if row_type == "technical_skill":
+            counts["technical_skill"] += 1
+        else:
+            counts["internship_or_project"] += 1
+    return counts
+
+
+def pick_next_topic(plan: dict, current_index: int, decision: str, history_rows: list) -> dict:
+    """Pick the next topic, enforcing the required question-type distribution:
+    TECHNICAL_QUESTION_TARGET technical-skill questions and PROJECT_INTERNSHIP_TARGET
+    internship/project questions out of MAX_QUESTIONS total. Once one category's quota
+    is used up, only topics from the other category are eligible — even if the AI's
+    adaptive_decision would otherwise have stayed on (or drifted back to) that topic."""
     topics = plan.get("topics", []) if plan else []
     if not topics:
         return {"name": "general technical background", "index": current_index}
-    if decision in ("new_topic", "end_topic"):
-        next_index = min(current_index + 1, len(topics) - 1)
-        return {"name": topics[next_index]["name"], "index": next_index}
-    name = topics[current_index]["name"] if current_index < len(topics) else topics[0]["name"]
-    return {"name": name, "index": current_index}
+
+    counts = _category_counts(plan, history_rows)
+    technical_done = counts["technical_skill"] >= TECHNICAL_QUESTION_TARGET
+    other_done = counts["internship_or_project"] >= PROJECT_INTERNSHIP_TARGET
+
+    required_type = None  # None = no constraint, either category is fine
+    if technical_done and not other_done:
+        required_type = "non_technical"  # must be internship or project
+    elif other_done and not technical_done:
+        required_type = "technical_skill"
+
+    def matches_required(topic_type: str) -> bool:
+        if required_type is None:
+            return True
+        if required_type == "technical_skill":
+            return topic_type == "technical_skill"
+        return topic_type != "technical_skill"
+
+    current_name = topics[current_index]["name"] if current_index < len(topics) else topics[0]["name"]
+    current_type = topics[current_index].get("type", "technical_skill") if current_index < len(topics) else "technical_skill"
+
+    # Stay on the same topic for a natural follow-up, but only if that topic's
+    # category still satisfies the required distribution — otherwise force a switch.
+    if decision not in ("new_topic", "end_topic") and matches_required(current_type):
+        return {"name": current_name, "index": current_index}
+
+    # Scan forward (wrapping around the topic list) for the next topic whose type
+    # satisfies the required category.
+    n = len(topics)
+    for offset in range(1, n + 1):
+        idx = (current_index + offset) % n
+        t = topics[idx]
+        if matches_required(t.get("type", "technical_skill")):
+            return {"name": t["name"], "index": idx}
+
+    # No topic in the plan matches the required category (e.g. resume has no
+    # internships/projects at all) — fall back to simple rotation rather than fail.
+    next_index = min(current_index + 1, n - 1)
+    return {"name": topics[next_index]["name"], "index": next_index}
 
 
 @router.post("/start")
@@ -106,7 +165,7 @@ def start_interview(payload: StartInterviewRequest):
         cursor.execute(
             """INSERT INTO interview_turns (session_id, turn_number, topic, question_text)
                VALUES (%s, 1, %s, %s)""",
-            (session_id, first_question.get("topic", first_topic), first_question["question_text"]),
+            (session_id, first_topic, first_question["question_text"]),
         )
         conn.commit()
         turn_id = cursor.lastrowid
@@ -119,7 +178,7 @@ def start_interview(payload: StartInterviewRequest):
             "sessionId": session_id,
             "turnId": turn_id,
             "turnNumber": 1,
-            "topic": first_question.get("topic", first_topic),
+            "topic": first_topic,
             "questionText": first_question["question_text"],
             "durationSeconds": duration * 60,
             "remainingSeconds": duration * 60,
@@ -226,16 +285,16 @@ async def submit_answer(
                 "remainingSeconds": 0,
             }
 
-        next_topic_info = pick_next_topic(
-            session["interview_plan"], session["current_topic_index"], evaluation["adaptive_decision"]
-        )
-
         cursor.execute(
             """SELECT topic, question_text, answer_text, technical_score, depth_score, relevance_score
                FROM interview_turns WHERE session_id = %s AND answer_text IS NOT NULL ORDER BY turn_number ASC""",
             (session_id,),
         )
         history_rows = cursor.fetchall()
+
+        next_topic_info = pick_next_topic(
+            session["interview_plan"], session["current_topic_index"], evaluation["adaptive_decision"], history_rows
+        )
 
         next_question = generate_next_question(
             parsed_resume, session["interview_plan"], history_rows, next_topic_info["name"]
@@ -248,7 +307,7 @@ async def submit_answer(
             (
                 session_id,
                 next_turn_number,
-                next_question.get("topic", next_topic_info["name"]),
+                next_topic_info["name"],
                 next_question["question_text"],
             ),
         )
@@ -269,7 +328,7 @@ async def submit_answer(
             "nextTurn": {
                 "turnId": next_turn_id,
                 "turnNumber": next_turn_number,
-                "topic": next_question.get("topic", next_topic_info["name"]),
+                "topic": next_topic_info["name"],
                 "questionText": next_question["question_text"],
             },
             "remainingSeconds": remaining_seconds,
