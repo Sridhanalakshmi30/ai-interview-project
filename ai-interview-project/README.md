@@ -212,3 +212,25 @@ ai-interview-project/
 - **Verification performed before delivery:** `python3 -m py_compile` on every backend file, a full production `vite build` for the frontend, and a live boot test of the backend confirming clean startup and correct graceful error handling when the database/API key aren't configured yet. The backend's route table was also verified against its OpenAPI schema to confirm all 5 endpoints (`/api/health`, `/api/resume/upload`, `/api/interview/start`, `/api/interview/{id}/answer`, `/api/interview/{id}/report`) are registered correctly.
 
 I don't have live access to verify current Groq pricing, rate limits, or exact model availability — check https://console.groq.com/docs/models before relying on the specific model names in `.env.example`, and swap them if a model has been renamed or deprecated since this was written.
+
+### Multiple-face policy
+
+The multiple-face termination threshold is fixed at two occurrences. The first
+confirmed occurrence warns the candidate; the second terminates the interview
+with a stored malpractice reason, independently of the shared violation limit.
+Older informational face events do not consume this warning.
+
+The browser checks every 500 ms and requires at least three consecutive
+multiple-face detections spanning one second. SSD MobileNet V1 uses a minimum confidence of 0.4, with weights served
+locally from `frontend/public/models`. The camera preview shows the detected
+face count and mirrored face outlines. Inference calls never overlap. If the extra face remains visible for ten seconds after the warning
+response, it reports another occurrence. A separate occurrence requires at least
+two seconds of single-face recovery, followed by a fresh confirmed detection.
+Camera interruptions reset timing. Detection is sampled, so timing may be longer
+than these minimums. Real-camera validation is still required.
+
+Regression checks:
+
+- Backend: `python -m unittest discover -s tests -v` from `backend`.
+- Frontend: `node --test src/hooks/multipleFaceTracker.test.js` from `frontend`.
+- Build: `npm run build` from `frontend`.

@@ -32,6 +32,7 @@ class ProctoringEventResponse(BaseModel):
     violation_count: int
     max_violations: int
     message: Optional[str] = None
+    termination_reason: Optional[str] = None
 
 
 class ProctoringSummaryResponse(BaseModel):
@@ -41,3 +42,16 @@ class ProctoringSummaryResponse(BaseModel):
     max_violations: int
     total_events: int
     events: List[Dict[str, Any]]
+    malpractice: bool = False
+    needs_review: bool = False
+    termination_reason: Optional[str] = None
+    no_face_events: int = 0
+    multiple_face_events: int = 0
+    tab_switch_events: int = 0
+    window_blur_events: int = 0
+    fullscreen_exit_events: int = 0
+    shortcut_attempts: int = 0
+    paste_attempts: int = 0
+    copy_attempts: int = 0
+    voice_mismatch_events: int = 0
+    voice_mismatches: List[Dict[str, Any]] = []

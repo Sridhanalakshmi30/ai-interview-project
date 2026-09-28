@@ -4,13 +4,13 @@ import json
 import time
 import random
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import Depends, APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 
 from config.db import get_connection
-from services import proctoring_service
+from services import proctoring_service, voice_verification_service
 from services.groq_service import (
     generate_interview_plan,
     generate_next_question,
@@ -19,7 +19,10 @@ from services.groq_service import (
     transcribe_audio,
 )
 
-router = APIRouter()
+from services.access_service import require_owner, issue_token
+
+router = APIRouter(dependencies=[Depends(require_owner)])
+VOICE_CHECK_ENABLED = os.getenv("VOICE_CHECK_ENABLED", "false").strip().lower() == "true"
 
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
@@ -38,6 +41,71 @@ class StartInterviewRequest(BaseModel):
 
 class ConsentRequest(BaseModel):
     candidateId: int
+
+
+@router.post("/{session_id}/quit")
+def quit_interview(session_id: int):
+    """End a voluntary withdrawal without treating it as a violation."""
+    conn = get_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT candidate_id, status FROM interview_sessions WHERE id = %s FOR UPDATE", (session_id,))
+        session = cursor.fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="Interview session not found.")
+        cursor.execute(
+            "UPDATE interview_sessions SET status = 'abandoned', ended_at = NOW() WHERE id = %s AND status = 'in_progress'",
+            (session_id,),
+        )
+        cursor.execute(
+            "UPDATE interview_proctoring_state SET status = 'COMPLETED' WHERE session_id = %s AND status != 'TERMINATED'",
+            (session_id,),
+        )
+        conn.commit()
+        voice_verification_service.clear_voice_embeddings(key=str(session_id), candidate_id=session['candidate_id'])
+        return {"sessionId": session_id, "status": "abandoned" if session['status'] == 'in_progress' else session['status']}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conn.close()
+
+
+@router.post("/{session_id}/finish")
+def finish_interview(session_id: int):
+    """Complete early using submitted answers; leave any unfinished turn unscored."""
+    conn = get_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT candidate_id, status FROM interview_sessions WHERE id = %s FOR UPDATE", (session_id,))
+        session = cursor.fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail="Interview session not found.")
+        if session['status'] not in ('in_progress', 'completed'):
+            raise HTTPException(status_code=409, detail="This interview has already ended.")
+        cursor.execute("SELECT status FROM interview_proctoring_state WHERE session_id = %s FOR UPDATE", (session_id,))
+        state = cursor.fetchone()
+        if state and state['status'] == 'TERMINATED':
+            raise HTTPException(status_code=409, detail="This interview has already been terminated.")
+        cursor.execute("SELECT COUNT(*) AS count FROM interview_turns WHERE session_id = %s AND answered_at IS NOT NULL", (session_id,))
+        if cursor.fetchone()['count'] == 0:
+            raise HTTPException(status_code=400, detail="Submit at least one answer before finishing the interview.")
+        cursor.execute("UPDATE interview_sessions SET status = 'completed', ended_at = NOW() WHERE id = %s AND status = 'in_progress'", (session_id,))
+        cursor.execute("UPDATE interview_proctoring_state SET status = 'COMPLETED' WHERE session_id = %s AND status != 'TERMINATED'", (session_id,))
+        conn.commit()
+        voice_verification_service.clear_voice_embeddings(key=str(session_id), candidate_id=session['candidate_id'])
+        return {"sessionId": session_id, "finished": True}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conn.close()
 
 
 @router.post("/consent")
@@ -60,6 +128,147 @@ def record_consent(payload: ConsentRequest):
         if cursor is not None:
             cursor.close()
         conn.close()
+
+
+def _clean_id(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    try:
+        s = str(val).strip()
+        if s and s.lower() not in ("none", "null", "undefined", ""):
+            return int(s)
+    except Exception:
+        pass
+    return None
+
+
+@router.post("/voice/baseline")
+async def record_voice_baseline(
+    candidateId: Optional[Any] = Form(None),
+    sessionId: Optional[Any] = Form(None),
+    audio: UploadFile = File(...),
+):
+    """
+    Registers the voice baseline from ~10s speech during the security check.
+    Extracts mathematical speaker embedding and immediately discards raw audio.
+    """
+    try:
+        if not VOICE_CHECK_ENABLED:
+            await audio.close()
+            return {"status": "DISABLED", "message": "Voice checks are disabled."}
+        audio_bytes = await audio.read()
+        cand_id = _clean_id(candidateId)
+        sess_id = _clean_id(sessionId)
+        key = str(sess_id) if sess_id is not None else (str(cand_id) if cand_id is not None else "default")
+        result = voice_verification_service.register_baseline_embedding(
+            key=key,
+            audio_source=audio_bytes,
+            candidate_id=cand_id,
+        )
+        return result
+    except Exception as err:
+        print(f"[voice/baseline] error: {err}")
+        raise HTTPException(status_code=500, detail=f"Failed to record voice baseline: {str(err)}")
+
+
+@router.post("/voice/verify")
+async def verify_candidate_voice(
+    sessionId: Optional[Any] = Form(None),
+    candidateId: Optional[Any] = Form(None),
+    questionNumber: Optional[Any] = Form(None),
+    audio: UploadFile = File(...),
+):
+    """
+    Compares spoken audio snippet against baseline embedding.
+    """
+    try:
+        if not VOICE_CHECK_ENABLED:
+            await audio.close()
+            return {"status": "DISABLED", "message": "Voice checks are disabled."}
+        audio_bytes = await audio.read()
+        cand_id = _clean_id(candidateId)
+        sess_id = _clean_id(sessionId)
+        key = str(sess_id) if sess_id is not None else (str(cand_id) if cand_id is not None else "default")
+        res = voice_verification_service.verify_voice(key=key, audio_source=audio_bytes)
+        return res
+    except Exception as err:
+        print(f"[voice/verify] error: {err}")
+        raise HTTPException(status_code=500, detail=f"Failed to verify voice: {str(err)}")
+
+
+@router.post("/voice/repeat-check")
+async def repeat_voice_check(
+    sessionId: Optional[Any] = Form(None),
+    candidateId: Optional[Any] = Form(None),
+    questionNumber: Optional[Any] = Form(None),
+    audio: UploadFile = File(...),
+):
+    """
+    Second-chance voice verification when a mismatch occurs.
+    If match: returns MATCH and allows candidate to resume.
+    If mismatch persists: pauses interview with VOICE_MISMATCH_PENDING_REVIEW and logs proctoring event.
+    Does NOT auto-reject or auto-terminate.
+    """
+    try:
+        if not VOICE_CHECK_ENABLED:
+            await audio.close()
+            return {"status": "DISABLED", "message": "Voice checks are disabled."}
+        audio_bytes = await audio.read()
+        cand_id = _clean_id(candidateId)
+        sess_id = _clean_id(sessionId)
+        key = str(sess_id) if sess_id is not None else (str(cand_id) if cand_id is not None else "default")
+        res = voice_verification_service.verify_voice(key=key, audio_source=audio_bytes)
+
+        if res["match"]:
+            return {
+                "match": True,
+                "similarity": res["similarity"],
+                "threshold": res["threshold"],
+                "status": "MATCH",
+                "message": "Voice verified successfully. Resuming interview.",
+            }
+
+        # Persistent mismatch: Pause interview and record event if session_id is available
+        event_res = None
+        if sessionId is not None:
+            event_res = proctoring_service.record_event(
+                session_id=sessionId,
+                event_type="VOICE_MISMATCH",
+                question_number=questionNumber,
+                metadata={
+                    "similarity": res["similarity"],
+                    "threshold": res["threshold"],
+                    "repeat_check": True,
+                    "needs_review": True,
+                    "reason": "VOICE_MISMATCH_PENDING_REVIEW",
+                },
+            )
+
+        return {
+            "match": False,
+            "similarity": res["similarity"],
+            "threshold": res["threshold"],
+            "status": "PAUSED",
+            "pausedReason": "VOICE_MISMATCH_PENDING_REVIEW",
+            "message": "Voice mismatch persists. Interview paused and flagged for human review.",
+            "proctoring": event_res,
+        }
+    except Exception as err:
+        print(f"[voice/repeat-check] error: {err}")
+        raise HTTPException(status_code=500, detail=f"Failed to perform repeat voice check: {str(err)}")
+
+
+@router.post("/voice/clear")
+def clear_voice_data(sessionId: Optional[int] = None, candidateId: Optional[int] = None):
+    """Purges biometric voice embeddings from ephemeral memory."""
+    try:
+        voice_verification_service.clear_voice_embeddings(key=str(sessionId) if sessionId else None, candidate_id=candidateId)
+        return {"success": True, "message": "Voice data cleared from ephemeral memory."}
+    except Exception as err:
+        print(f"[voice/clear] error: {err}")
+        return {"success": False, "error": str(err)}
+
+
 
 
 def _load_json_field(value):
@@ -188,6 +397,7 @@ def start_interview(payload: StartInterviewRequest):
         )
         conn.commit()
         session_id = cursor.lastrowid
+        session_token = issue_token(cursor, "session", session_id)
 
         first_topic = plan["topics"][0]["name"] if plan.get("topics") else "general technical background"
         first_question = generate_next_question(parsed_resume, plan, [], first_topic)
@@ -204,8 +414,13 @@ def start_interview(payload: StartInterviewRequest):
         conn.commit()
         cursor.close()
 
+        # Link session_id to candidate's voice baseline embedding
+        if VOICE_CHECK_ENABLED:
+            voice_verification_service.link_session_embedding(session_id, payload.candidateId)
+
         return {
             "sessionId": session_id,
+            "accessToken": session_token,
             "turnId": turn_id,
             "turnNumber": 1,
             "topic": first_topic,
@@ -216,6 +431,7 @@ def start_interview(payload: StartInterviewRequest):
     except HTTPException:
         raise
     except ValueError as err:
+        print(f"[interview/start] ValueError: {err}")
         raise HTTPException(status_code=400, detail=str(err))
     except Exception as err:
         print(f"[interview/start] error: {err}")
@@ -230,17 +446,22 @@ async def submit_answer(
     session_id: int,
     turnId: int = Form(...),
     answerText: Optional[str] = Form(None),
+    answerSource: str = Form("typed", pattern="^(typed|voice)$"),
     audio: Optional[UploadFile] = File(None),
 ):
+    if audio is not None and not VOICE_CHECK_ENABLED:
+        await audio.close()
+        raise HTTPException(status_code=400, detail="Audio uploads are disabled. Send the speech transcript as answerText.")
     audio_path = None
     conn = None
+    voice_verify_result = None
     try:
         session = get_session(session_id)
         if session["status"] != "in_progress":
             raise HTTPException(status_code=400, detail="This interview session has already ended.")
 
         final_answer_text = (answerText or "").strip()
-        answer_source = "typed" if final_answer_text else "voice"
+        answer_source = answerSource
 
         parsed_resume = get_candidate_resume(session["candidate_id"])
 
@@ -251,6 +472,15 @@ async def submit_answer(
             contents = await audio.read()
             with open(audio_path, "wb") as f:
                 f.write(contents)
+
+            # Perform speaker voice verification against security check baseline
+            try:
+                voice_verify_result = voice_verification_service.verify_voice(
+                    key=str(session_id),
+                    audio_source=audio_path,
+                )
+            except Exception as v_err:
+                print(f"[interview/answer] voice verification error: {v_err}")
 
             hint_terms = (
                 (parsed_resume.get("technical_skills") or [])
@@ -265,6 +495,7 @@ async def submit_answer(
             else:
                 final_answer_text = transcript
                 answer_source = "voice"
+
 
         if not final_answer_text:
             final_answer_text = "(No answer provided.)"
@@ -367,7 +598,7 @@ async def submit_answer(
         conn.commit()
         cursor.close()
 
-        return {
+        resp_data = {
             "finished": False,
             "transcript": final_answer_text,
             "evaluation": evaluation,
@@ -379,6 +610,13 @@ async def submit_answer(
             },
             "remainingSeconds": remaining_seconds,
         }
+        if voice_verify_result and not voice_verify_result.get("match", True):
+            resp_data["voiceMismatch"] = True
+            resp_data["similarity"] = voice_verify_result.get("similarity")
+            resp_data["threshold"] = voice_verify_result.get("threshold")
+
+        return resp_data
+
     except HTTPException:
         raise
     except ValueError as err:
@@ -550,7 +788,7 @@ def get_report(session_id: int):
         cursor.execute(
             """SELECT turn_number, topic, question_text, answer_text, technical_score, depth_score,
                       relevance_score, rationale
-               FROM interview_turns WHERE session_id = %s ORDER BY turn_number ASC""",
+               FROM interview_turns WHERE session_id = %s AND answered_at IS NOT NULL ORDER BY turn_number ASC""",
             (session_id,),
         )
         turns = cursor.fetchall()

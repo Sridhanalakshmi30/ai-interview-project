@@ -26,37 +26,40 @@ export default function PrivacyConsent({ candidateId, onAccepted, onDeclined }) 
 
   return (
     <section className="card privacy-consent" aria-labelledby="privacy-title">
-      <h2 id="privacy-title">Privacy &amp; monitoring notice</h2>
+      <h2 id="privacy-title">Privacy &amp; Monitoring Notice</h2>
+
       <h3>This interview uses</h3>
       <ul>
-        <li>Camera</li>
-        <li>Microphone</li>
-        <li>Fullscreen enforcement</li>
-        <li>Browser activity monitoring: tab switches and window focus</li>
+        <li><strong>Camera &amp; Face Tracking:</strong> Local in-browser face verification ensures you remain on camera.</li>
+        <li><strong>Microphone:</strong> Browser speech recognition converts spoken answers into text. Depending on your browser, its speech provider may process audio remotely. This app sends only the transcript to the interview server.</li>
+        <li><strong>Fullscreen Enforcement:</strong> Fullscreen mode is required to maintain focus.</li>
+        <li><strong>Browser Activity Monitoring:</strong> Tab switches and window focus loss are detected.</li>
       </ul>
-      <h3>What is recorded</h3>
+
+      <h3>What is analysed &amp; stored</h3>
       <ul>
-        <li>Your typed answers and transcripts of spoken answers.</li>
-        <li>Proctoring events, including violations, warnings, and their metadata.</li>
-        <li>Proctoring does not continuously record video or audio.</li>
+        <li><strong>Speech Privacy:</strong> This interview does not record or upload audio clips or create a voice profile. Spoken answers, including any edits, are saved as text and marked as voice answers.</li>
+        <li><strong>Interview Content:</strong> Your typed answers, speech transcripts, and proctoring event logs are saved for evaluation.</li>
       </ul>
-      <h3>What is not collected</h3>
-      <ul>
-        <li>Camera video is not uploaded or stored. Face detection runs locally in your browser.</li>
-        <li>No biometric templates are stored.</li>
-        <li>Proctoring audio is not uploaded or stored. If you submit a voice recording as an answer,
-          it is uploaded for transcription by Groq and the temporary audio file is deleted from
-          this server after processing.</li>
-      </ul>
-      <p>This data is used only for interview evaluation and integrity review.</p>
-      <p>Camera and microphone permission will be requested during the next step, after you agree.</p>
+
+      <h3>Integrity Policy</h3>
+      <p>
+        Camera, fullscreen, and browser activity monitoring remain active during the interview. Proctoring events are recorded for review.
+      </p>
+
       <form onSubmit={handleContinue}>
         <label className="consent-checkbox">
-          <input type="checkbox" checked={agreed} disabled={saving}
-            onChange={(event) => setAgreed(event.target.checked)} />
-          <span>I have read and agree to the monitoring described above.</span>
+          <input
+            type="checkbox"
+            checked={agreed}
+            disabled={saving}
+            onChange={(event) => setAgreed(event.target.checked)}
+          />
+          <span>
+            I have read and agree to the camera, microphone, and browser activity monitoring described above.
+          </span>
         </label>
-        {error && <p role="alert">{error}</p>}
+        {error && <p className="error-text" role="alert">{error}</p>}
         <div className="consent-actions">
           <button type="submit" className="primary-btn" disabled={!agreed || saving}>
             {saving ? 'Saving consent…' : 'I Agree — Continue'}

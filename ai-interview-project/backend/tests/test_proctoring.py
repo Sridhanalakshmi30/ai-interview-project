@@ -6,6 +6,38 @@ from services import proctoring_service
 
 
 class ProctoringTests(unittest.TestCase):
+    @patch('services.violation_service.MULTI_FACE_TERMINATE_AT', 2)
+    def test_multiple_faces_warn_then_terminate_independently(self):
+        first = evaluate_event('MULTIPLE_FACES_DETECTED', 0, 4)
+        self.assertEqual(first['action'], 'FINAL_WARN')
+        second = evaluate_event('MULTIPLE_FACES_DETECTED', 1, 4, previous_multiple_face_events=1)
+        self.assertEqual(second['action'], 'TERMINATE')
+        self.assertTrue(second['paused_reason'].startswith('MALPRACTICE:'))
+        self.assertEqual(second['new_violation_count'], 2)
+        # A first face occurrence still receives its warning at the shared limit.
+        self.assertEqual(evaluate_event('MULTIPLE_FACES_DETECTED', 3, 4)['action'], 'FINAL_WARN')
+
+    def test_no_face_stays_informational(self):
+        self.assertEqual(evaluate_event('NO_FACE_DETECTED', 1, 4)['violation_increment'], 0)
+
+    @patch('services.violation_service.MULTI_FACE_TERMINATE_AT', 2)
+    @patch('services.proctoring_service.get_connection')
+    def test_multiple_face_count_is_read_under_lock_and_reason_saved(self, get_connection):
+        conn = get_connection.return_value
+        cursor = conn.cursor.return_value
+        cursor.fetchone.side_effect = [
+            {'status': 'WARNING', 'violation_count': 1, 'max_violations': 4},
+            {'count': 1},
+        ]
+        result = proctoring_service.record_event(1, 'multiple_faces_detected')
+        self.assertEqual(result['action'], 'TERMINATE')
+        self.assertTrue(result['termination_reason'].startswith('MALPRACTICE:'))
+        calls = cursor.execute.call_args_list
+        self.assertIn('FOR UPDATE', calls[0].args[0])
+        self.assertIn("severity IN ('WARNING', 'TERMINATE')", calls[1].args[0])
+        self.assertEqual(calls[3].args[1][2], result['termination_reason'])
+        conn.commit.assert_called_once()
+
     def test_third_departure_terminates(self):
         count = 0
         for event, action in zip(

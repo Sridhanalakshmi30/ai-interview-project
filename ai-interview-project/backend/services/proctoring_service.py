@@ -101,6 +101,7 @@ def record_event(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Record a proctoring event, evaluate violation policy, and update state."""
+    event_type = event_type.strip().upper()
     conn = get_connection()
     try:
         cursor = conn.cursor(dictionary=True)
@@ -124,13 +125,25 @@ def record_event(
                 "violation_count": state["violation_count"],
                 "max_violations": state["max_violations"],
                 "message": f"Interview is already {state['status']}.",
+                "termination_reason": state.get("paused_reason"),
             }
+
+        previous_multiple_face_events = 0
+        if event_type == "MULTIPLE_FACES_DETECTED":
+            cursor.execute(
+                "SELECT COUNT(*) AS count FROM interview_proctoring_events "
+                "WHERE session_id = %s AND event_type = 'MULTIPLE_FACES_DETECTED' "
+                "AND severity IN ('WARNING', 'TERMINATE')",
+                (session_id,),
+            )
+            previous_multiple_face_events = cursor.fetchone()["count"]
 
         eval_res = evaluate_event(
             event_type=event_type,
             current_violation_count=state["violation_count"],
             max_violations=state["max_violations"],
             metadata=metadata,
+            previous_multiple_face_events=previous_multiple_face_events,
         )
 
         # 1. Log event in DB
@@ -187,6 +200,7 @@ def record_event(
             "violation_count": eval_res["new_violation_count"],
             "max_violations": state["max_violations"],
             "message": eval_res["message"],
+            "termination_reason": eval_res["paused_reason"] if eval_res["action"] == "TERMINATE" else None,
         }
     finally:
         conn.close()
@@ -270,6 +284,11 @@ def mark_completed(session_id: int):
         )
         conn.commit()
         cursor.close()
+        try:
+            from services.voice_verification_service import clear_voice_embeddings
+            clear_voice_embeddings(session_id)
+        except Exception:
+            pass
     except Exception as e:
         print(f"[proctoring_service/mark_completed] error: {e}")
     finally:
@@ -318,12 +337,32 @@ def get_summary(session_id: int) -> Dict[str, Any]:
         def count(event_name):
             return sum(1 for e in events if e.get("event_type") == event_name)
 
+        voice_mismatches = [
+            {
+                "id": e.get("id"),
+                "question_number": e.get("question_number"),
+                "timestamp": e.get("created_at"),
+                "metadata": e.get("metadata") or {},
+                "similarity": (e.get("metadata") or {}).get("similarity") if isinstance(e.get("metadata"), dict) else None,
+                "threshold": (e.get("metadata") or {}).get("threshold") if isinstance(e.get("metadata"), dict) else None,
+            }
+            for e in events
+            if e.get("event_type") == "VOICE_MISMATCH"
+        ]
+
+        voice_mismatch_count = len(voice_mismatches)
+        is_paused_for_voice = state["status"] == "PAUSED" and state.get("paused_reason") == "VOICE_MISMATCH_PENDING_REVIEW"
+        needs_review = is_paused_for_voice or voice_mismatch_count > 0
+
         return {
             "session_id": state["session_id"],
             "status": state["status"],
             "violation_count": state["violation_count"],
             "max_violations": state["max_violations"],
             "total_events": len(events),
+            "malpractice": state["status"] == "TERMINATED" and (state.get("paused_reason") or "").startswith("MALPRACTICE:"),
+            "needs_review": needs_review,
+            "termination_reason": state.get("paused_reason") if state["status"] == "TERMINATED" else (state.get("paused_reason") if is_paused_for_voice else None),
             "no_face_events": count("NO_FACE_DETECTED"),
             "multiple_face_events": count("MULTIPLE_FACES_DETECTED"),
             "tab_switch_events": count("TAB_SWITCH"),
@@ -332,8 +371,11 @@ def get_summary(session_id: int) -> Dict[str, Any]:
             "shortcut_attempts": count("SHORTCUT_BLOCKED"),
             "paste_attempts": count("PASTE_BLOCKED"),
             "copy_attempts": count("COPY_BLOCKED"),
+            "voice_mismatch_events": voice_mismatch_count,
+            "voice_mismatches": voice_mismatches,
             "events": events,
         }
 
     finally:
         conn.close()
+

@@ -1,5 +1,5 @@
 """Proctoring API router."""
-from fastapi import APIRouter, HTTPException
+from fastapi import Depends, APIRouter, HTTPException
 from schemas.proctoring import (
     StartProctoringRequest,
     ProctoringEventRequest,
@@ -10,7 +10,9 @@ from schemas.proctoring import (
 from services import proctoring_service
 from services.violation_service import DEFAULT_MAX_VIOLATIONS
 
-router = APIRouter()
+from services.access_service import require_owner, issue_token
+
+router = APIRouter(dependencies=[Depends(require_owner)])
 
 
 @router.post("/start", response_model=ProctoringStatusResponse)

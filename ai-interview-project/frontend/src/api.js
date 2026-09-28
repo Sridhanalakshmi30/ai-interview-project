@@ -1,3 +1,4 @@
+import { authFetch } from './services/authFetch.js';
 // Small fetch wrapper for all backend calls. The Vite dev server proxies /api to the backend.
 
 async function handleResponse(res) {
@@ -11,12 +12,12 @@ async function handleResponse(res) {
 export async function uploadResume(file) {
   const formData = new FormData();
   formData.append('resume', file);
-  const res = await fetch('/api/resume/upload', { method: 'POST', body: formData });
+  const res = await authFetch('/api/resume/upload', { method: 'POST', body: formData });
   return handleResponse(res);
 }
 
 export async function giveConsent(candidateId) {
-  const res = await fetch('/api/interview/consent', {
+  const res = await authFetch('/api/interview/consent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ candidateId }),
@@ -25,35 +26,94 @@ export async function giveConsent(candidateId) {
 }
 
 export async function startInterview(candidateId, durationMinutes) {
-  const res = await fetch('/api/interview/start', {
+  const res = await authFetch('/api/interview/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ candidateId, durationMinutes })
+    body: JSON.stringify({ candidateId, durationMinutes }),
   });
   return handleResponse(res);
 }
 
-export async function submitAnswer(sessionId, turnId, { answerText, audioBlob }) {
+export async function registerVoiceBaseline(candidateId, audioBlob, sessionId = null) {
   const formData = new FormData();
-  formData.append('turnId', turnId);
-  if (answerText) formData.append('answerText', answerText);
-  if (audioBlob) formData.append('audio', audioBlob, 'answer.webm');
+  if (candidateId) formData.append('candidateId', candidateId);
+  if (sessionId) formData.append('sessionId', sessionId);
+  const filename = (audioBlob.type && audioBlob.type.includes('wav')) ? 'baseline.wav' : 'baseline.webm';
+  formData.append('audio', audioBlob, filename);
 
-  const res = await fetch(`/api/interview/${sessionId}/answer`, { method: 'POST', body: formData });
+  const res = await authFetch('/api/interview/voice/baseline', {
+    method: 'POST',
+    body: formData,
+  });
   return handleResponse(res);
 }
 
+export async function verifyVoice(sessionId, audioBlob, questionNumber = null) {
+  const formData = new FormData();
+  if (sessionId) formData.append('sessionId', sessionId);
+  if (questionNumber) formData.append('questionNumber', questionNumber);
+  const filename = (audioBlob.type && audioBlob.type.includes('wav')) ? 'voice_check.wav' : 'voice_check.webm';
+  formData.append('audio', audioBlob, filename);
+
+  const res = await authFetch('/api/interview/voice/verify', {
+    method: 'POST',
+    body: formData,
+  });
+  return handleResponse(res);
+}
+
+export async function submitRepeatVoiceCheck(sessionId, audioBlob, questionNumber = null) {
+  const formData = new FormData();
+  if (sessionId) formData.append('sessionId', sessionId);
+  if (questionNumber) formData.append('questionNumber', questionNumber);
+  const filename = (audioBlob.type && audioBlob.type.includes('wav')) ? 'repeat_check.wav' : 'repeat_check.webm';
+  formData.append('audio', audioBlob, filename);
+
+  const res = await authFetch('/api/interview/voice/repeat-check', {
+    method: 'POST',
+    body: formData,
+  });
+  return handleResponse(res);
+}
+
+export async function clearVoiceEmbedding(sessionId = null, candidateId = null) {
+  const res = await authFetch('/api/interview/voice/clear', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, candidateId }),
+  });
+  return handleResponse(res);
+}
+
+export async function submitAnswer(sessionId, turnId, { answerText, answerSource = 'typed' }) {
+  const formData = new FormData();
+  formData.append('turnId', turnId);
+  if (answerText) formData.append('answerText', answerText);
+  formData.append('answerSource', answerSource);
+
+  const res = await authFetch(`/api/interview/${sessionId}/answer`, { method: 'POST', body: formData });
+  return handleResponse(res);
+}
+
+
 export async function requestNextQuestion(sessionId) {
-  const res = await fetch(
-    `/api/interview/${sessionId}/next-question`,
-    {
-      method: 'POST',
-    }
-  );
+  const res = await authFetch(`/api/interview/${sessionId}/next-question`, {
+    method: 'POST',
+  });
   return handleResponse(res);
 }
 
 export async function getReport(sessionId) {
-  const res = await fetch(`/api/interview/${sessionId}/report`);
+  const res = await authFetch(`/api/interview/${sessionId}/report`);
+  return handleResponse(res);
+}
+
+export async function quitInterview(sessionId) {
+  const res = await authFetch(`/api/interview/${sessionId}/quit`, { method: 'POST' });
+  return handleResponse(res);
+}
+
+export async function finishInterview(sessionId) {
+  const res = await authFetch(`/api/interview/${sessionId}/finish`, { method: 'POST' });
   return handleResponse(res);
 }

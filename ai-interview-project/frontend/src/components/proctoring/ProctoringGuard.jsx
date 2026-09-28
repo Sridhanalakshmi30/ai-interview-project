@@ -5,7 +5,7 @@ import ViolationWarning from './ViolationWarning.jsx';
 import ProctoringStatusBadge from './ProctoringStatusBadge.jsx';
 import LockdownOverlay from './LockdownOverlay.jsx';
 
-export default function ProctoringGuard({ children }) {
+export default function ProctoringGuard({ candidateId, children }) {
   const [checksPassed, setChecksPassed] = useState(false);
   const [sessionId, setSessionId] = useState(null);
 
@@ -30,8 +30,10 @@ export default function ProctoringGuard({ children }) {
     return (
       <>
         <SecurityCheckScreen
+          candidateId={candidateId}
           onStart={handleStart}
           mediaError={proctoring.mediaError}
+          mediaStream={proctoring.mediaStream}
         />
 
         <VideoSink
@@ -45,17 +47,9 @@ export default function ProctoringGuard({ children }) {
   if (proctoring.phase === 'TERMINATED') {
     return (
       <div className="card proctor-terminated" role="alert" aria-live="assertive">
-        <h2>🚫 Interview Ended — Malpractice Detected</h2>
-
-        <p>
-          Your interview was ended automatically after{' '}
-          <strong>
-            {proctoring.violationCount} of {proctoring.maxViolations}
-          </strong>{' '}
-          proctoring violations — repeatedly switching away from, leaving fullscreen, or otherwise
-          leaving the secure interview environment. Suspected malpractice has been recorded
-          in the interview violation log. You cannot continue this interview.
-        </p>
+        <h2>INTERVIEW ENDED &mdash; MALPRACTICE</h2>
+        <p>{proctoring.terminationReason || 'The interview ended after repeated proctoring violations.'}</p>
+        <p>You cannot continue this interview. The reason has been recorded for review.</p>
 
         <p className="hint">
           Your interview activity and answers up to this point have been saved.
@@ -84,6 +78,9 @@ export default function ProctoringGuard({ children }) {
 
     reportViolation:
       proctoring.reportViolation,
+
+    mediaStream:
+      proctoring.mediaStream,
   };
 
 
@@ -105,11 +102,11 @@ export default function ProctoringGuard({ children }) {
 
           <strong>Interview paused.</strong>{' '}
 
-          {proctoring.pausedReason &&
-          proctoring.pausedReason.startsWith('CAMERA')
+          {proctoring.pausedReason === 'VOICE_MISMATCH_PENDING_REVIEW'
+            ? 'Voice mismatch flagged for human review. An evaluator will review the audio logs.'
+            : proctoring.pausedReason && proctoring.pausedReason.startsWith('CAMERA')
             ? 'Camera connection lost. Please enable your camera to continue the interview.'
-            : proctoring.pausedReason &&
-              proctoring.pausedReason.startsWith('MIC')
+            : proctoring.pausedReason && proctoring.pausedReason.startsWith('MIC')
             ? 'Microphone connection lost. Please enable your microphone to continue.'
             : 'Please resolve the issue to continue.'}
 
@@ -124,7 +121,8 @@ export default function ProctoringGuard({ children }) {
         </div>
       )}
 
-      <VideoSink stream={proctoring.mediaStream} videoRef={videoRef} />
+
+      <VideoSink stream={proctoring.mediaStream} videoRef={videoRef} detection={proctoring.faceDetection} />
 
       {children(childProctoring)}
 
@@ -149,7 +147,7 @@ export default function ProctoringGuard({ children }) {
   );
 }
 
-function VideoSink({ stream, videoRef }) {
+function VideoSink({ stream, videoRef, detection }) {
   const [playing, setPlaying] = useState(false);
 
   React.useEffect(() => {
@@ -166,6 +164,7 @@ function VideoSink({ stream, videoRef }) {
         <strong>Your camera</strong>
         <span role="status">{playing ? 'Live' : 'Connecting...'}</span>
       </div>
+      <div style={{ position: 'relative' }}>
       <video
         ref={videoRef}
         autoPlay
@@ -175,7 +174,22 @@ function VideoSink({ stream, videoRef }) {
         onWaiting={() => setPlaying(false)}
         onEmptied={() => setPlaying(false)}
         aria-label="Live view of your camera"
+        style={{ display: 'block', width: '100%', height: 'auto', objectFit: 'contain' }}
       />
+      {detection?.boxes.map((box, index) => (
+        <div key={index} aria-hidden="true" style={{
+          position: 'absolute', pointerEvents: 'none', boxSizing: 'border-box',
+          left: `${(1 - box.x - box.width) * 100}%`, top: `${box.y * 100}%`,
+          width: `${box.width * 100}%`, height: `${box.height * 100}%`,
+          border: `2px solid ${detection.count > 1 ? '#ff4848' : '#00e69b'}`,
+        }} />
+      ))}
+      </div>
+      {detection && <p role="status">
+        {detection.status === 'active' ? `Faces detected: ${detection.count}` :
+          detection.status === 'error' ? 'Face detection unavailable. Check your connection and restart.' :
+          'Waiting for face detection...'}
+      </p>}
       <p>Keep your face visible and well lit.</p>
     </section>
   );

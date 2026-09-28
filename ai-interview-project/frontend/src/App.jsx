@@ -54,12 +54,14 @@ export default function App() {
         )}
 
         {step === 'interview' && (
-          <ProctoringGuard key={candidateId}>
+          <ProctoringGuard candidateId={candidateId} key={candidateId}>
             {(proctoring) => (
+
               <Interview
                 candidateId={candidateId}
                 candidateName={candidateName}
                 onFinished={handleInterviewFinished}
+                onQuit={() => setStep('quit')}
                 proctoring={proctoring}
               />
             )}
@@ -68,6 +70,13 @@ export default function App() {
 
         {step === 'report' && (
           <Report sessionId={sessionId} onRestart={handleRestart} />
+        )}
+        {step === 'quit' && (
+          <section className="card">
+            <h2>You have quit the interview</h2>
+            <p>Your submitted answers have been saved. Your unfinished answer was discarded.</p>
+            <button className="secondary-btn" onClick={handleRestart}>Return to resume upload</button>
+          </section>
         )}
       </main>
     </div>

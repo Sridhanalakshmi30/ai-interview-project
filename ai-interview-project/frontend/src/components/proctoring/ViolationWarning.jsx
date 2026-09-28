@@ -24,6 +24,7 @@ export default function ViolationWarning({
 
   const isFinal =
     violation.action === 'FINAL_WARN';
+  const isMultipleFaces = violation.eventType === 'MULTIPLE_FACES_DETECTED';
 
   const message =
     EVENT_LABELS[violation.eventType] ||
@@ -54,13 +55,13 @@ export default function ViolationWarning({
         <p>{message}</p>
 
         <p>
-          {isFinal
+          {isMultipleFaces ? violation.message : isFinal
             ? 'The next violation reaches the violation limit. Your interview will end with a suspected malpractice notification.'
             : 'Return to fullscreen and stay on the interview tab. Reaching the violation limit will end the interview.'}
         </p>
 
         <p className="proctor-violation-count">
-          Warning: {violationCount} / {maxViolations}
+          {isMultipleFaces ? 'Ask the other person to leave the camera view now.' : `Warning: ${violationCount} / ${maxViolations}`}
         </p>
 
         <button

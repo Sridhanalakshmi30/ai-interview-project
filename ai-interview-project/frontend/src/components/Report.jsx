@@ -89,20 +89,58 @@ export default function Report({ sessionId, onRestart }) {
 
       {proctoringSummary && (
         <>
-          <h3>Proctoring Summary</h3>
+          <h3>Proctoring &amp; Identity Summary</h3>
           {(proctoringSummary.status === 'TERMINATED' || proctoringSummary.proctoring_status === 'TERMINATED') && (
             <p className="malpractice-flag">
-              🚫 Malpractice flag — this interview was auto-terminated for repeated proctoring violations.
+              {proctoringSummary.malpractice && <strong>Malpractice: </strong>}
+              {proctoringSummary.termination_reason || 'This interview was terminated for repeated proctoring violations.'}
             </p>
           )}
+
+          {proctoringSummary.needs_review && (
+            <div className="voice-review-banner">
+              <strong>⚠️ Integrity Review Flag:</strong> voice mismatch, needs review
+              <p style={{ margin: '0.4rem 0 0', fontSize: '0.9rem' }}>
+                A voice pattern discrepancy was detected during the interview and recorded for human evaluator review.
+              </p>
+            </div>
+          )}
+
+          {proctoringSummary.voice_mismatches && proctoringSummary.voice_mismatches.length > 0 && (
+            <div className="voice-mismatch-audit">
+              <h4 style={{ margin: '0.75rem 0 0.4rem', color: '#b45309' }}>Voice Verification Audit Trail</h4>
+              <ul className="voice-audit-list">
+                {proctoringSummary.voice_mismatches.map((item, i) => (
+                  <li key={i} className="voice-audit-item">
+                    <span className="flag-tag">voice mismatch, needs review</span>
+                    <span> &bull; Question {item.question_number ?? 'N/A'}</span>
+                    <span> &bull; {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : 'Recorded'}</span>
+                    {typeof item.similarity === 'number' && (
+                      <span className="similarity-tag">
+                        {' '}(similarity: {item.similarity}, threshold: {item.threshold ?? 0.68})
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <ul className="score-list">
             <li>
               <span className="skill-name">Proctoring status</span>
               <span className="skill-score">{proctoringSummary.status || 'COMPLETED'}</span>
             </li>
             <li>
+              <span className="skill-name">Voice mismatch events</span>
+              <span className="skill-score">
+                {proctoringSummary.voice_mismatch_events || 0}
+                {proctoringSummary.voice_mismatch_events > 0 && ' (needs review)'}
+              </span>
+            </li>
+            <li>
               <span className="skill-name">Total violations</span>
-              <span className="skill-score">{proctoringSummary.violation_count || 0} / {proctoringSummary.max_violations || 3}</span>
+              <span className="skill-score">{proctoringSummary.violation_count || 0} / {proctoringSummary.max_violations || 4}</span>
             </li>
             <li>
               <span className="skill-name">Tab switch events</span>
@@ -139,6 +177,7 @@ export default function Report({ sessionId, onRestart }) {
           </ul>
         </>
       )}
+
 
       <button className="primary-btn" onClick={onRestart} style={{ marginTop: '1.5rem' }}>
         Start a New Interview

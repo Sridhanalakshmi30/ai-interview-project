@@ -5,6 +5,7 @@ import { useTabDetection } from './useTabDetection.js';
 import { useFocusDetection } from './useFocusDetection.js';
 import { useKeyboardGuard } from './useKeyboardGuard.js';
 import { useFaceDetection } from './useFaceDetection.js';
+import { loadFaceApiModels } from './faceApiLoader.js';
 
 import {
   startProctoring,
@@ -21,6 +22,8 @@ export function useProctoring({ sessionId, videoRef, maxViolations = 4 } = {}) {
   const [violationCount, setViolationCount] = useState(0);
   const [maxViolationsState, setMaxViolationsState] = useState(maxViolations);
   const [lastViolation, setLastViolation] = useState(null);
+  const [terminationReason, setTerminationReason] = useState(null);
+  const [detectorError, setDetectorError] = useState(null);
   const [questionNumber, setQuestionNumber] = useState(1);
   // Instant, client-only signal used to lock the screen the moment focus is
   // lost — does NOT wait for the server round-trip that reportEvent() does,
@@ -61,6 +64,8 @@ export function useProctoring({ sessionId, videoRef, maxViolations = 4 } = {}) {
       const sid = sessionIdRef.current;
       if (!sid) {
         pendingEventsRef.current.push({ eventType, durationSeconds, metadata });
+        // Face policy is decided by the server, including its configured threshold.
+        if (eventType === 'NO_FACE_DETECTED' || eventType === 'MULTIPLE_FACES_DETECTED') return;
         // Fallback local tracking if session not yet registered
         if (eventType === 'CAMERA_DISABLED' || eventType === 'MIC_DISABLED') {
           setPhase('PAUSED');
@@ -98,6 +103,7 @@ export function useProctoring({ sessionId, videoRef, maxViolations = 4 } = {}) {
         }
 
         if (response.action === 'TERMINATE') {
+          setTerminationReason(response.termination_reason || response.message);
           phaseRef.current = 'TERMINATED';
           setPhase('TERMINATED');
         } else if (response.action === 'PAUSE') {
@@ -187,14 +193,14 @@ export function useProctoring({ sessionId, videoRef, maxViolations = 4 } = {}) {
   });
 
   // Hook 6: Face Detection
-  useFaceDetection({
+  const faceDetection = useFaceDetection({
     videoRef,
-    isActive: isMonitoringActive,
+    isActive: isMonitoringActive && Boolean(sessionId),
     onNoFaceDetected: () => {
       handleViolationEvent('NO_FACE_DETECTED');
     },
     onMultipleFacesDetected: ({ faceCount }) => {
-      handleViolationEvent('MULTIPLE_FACES_DETECTED', {
+      return handleViolationEvent('MULTIPLE_FACES_DETECTED', {
         metadata: { faceCount },
       });
     },
@@ -208,9 +214,14 @@ export function useProctoring({ sessionId, videoRef, maxViolations = 4 } = {}) {
           // Preserve violations that happened while the first AI question loaded.
           for (const event of pendingEventsRef.current.splice(0)) {
             const result = await sendProctoringEvent(sessionId, event.eventType, event);
+            if (result.action === 'WARN' || result.action === 'FINAL_WARN') {
+              setPhase('WARNING');
+              setLastViolation({ eventType: event.eventType, action: result.action, message: result.message });
+            }
             data = { ...data, ...result, status: result.action === 'TERMINATE' ? 'TERMINATED' : data.status };
           }
           if (data.status === 'TERMINATED') {
+            setTerminationReason(data.termination_reason || data.paused_reason || data.message);
             phaseRef.current = 'TERMINATED';
             setPhase(data.status);
           }
@@ -229,8 +240,13 @@ export function useProctoring({ sessionId, videoRef, maxViolations = 4 } = {}) {
 
   const runSecurityCheck = useCallback(async () => {
     try {
+      setDetectorError(null);
       await mediaMonitor.requestMedia();
       if (!await fullscreen.enterFullscreen()) return false;
+      if (!await loadFaceApiModels()) {
+        setDetectorError('Face detection could not load. Check your connection and retry before starting the interview.');
+        return false;
+      }
 
       if (sessionIdRef.current) {
         await startProctoring(sessionIdRef.current);
@@ -304,8 +320,10 @@ export function useProctoring({ sessionId, videoRef, maxViolations = 4 } = {}) {
     violationCount,
     maxViolations: maxViolationsState,
     lastViolation,
+    terminationReason,
+    faceDetection,
     mediaStream: mediaMonitor.mediaStream,
-    mediaError: mediaMonitor.mediaError,
+    mediaError: detectorError || mediaMonitor.mediaError,
     setQuestionNumber,
     runSecurityCheck,
     dismissWarning,

@@ -3,7 +3,7 @@ import * as faceapi from 'face-api.js';
 let modelsLoaded = false;
 let loadingPromise = null;
 
-const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
+const MODEL_URL = '/models';
 
 export async function loadFaceApiModels(customModelUrl) {
   if (modelsLoaded) return true;
@@ -13,7 +13,7 @@ export async function loadFaceApiModels(customModelUrl) {
     try {
       const url = customModelUrl || MODEL_URL;
       await Promise.all([
-        faceapi.nets.tinyFaceDetector.loadFromUri(url),
+        faceapi.nets.ssdMobilenetv1.loadFromUri(url),
       ]);
       modelsLoaded = true;
       return true;

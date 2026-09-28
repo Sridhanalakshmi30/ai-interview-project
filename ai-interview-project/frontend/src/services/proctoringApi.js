@@ -1,3 +1,4 @@
+import { authFetch } from './authFetch.js';
 async function handleResponse(res) {
   const data = await res.json().catch(() => ({}));
 
@@ -15,7 +16,7 @@ async function handleResponse(res) {
 }
 
 export async function startProctoring(sessionId) {
-  const res = await fetch(
+  const res = await authFetch(
     '/api/interview/proctoring/start',
     {
       method: 'POST',
@@ -40,7 +41,7 @@ export async function sendProctoringEvent(
     metadata,
   } = {}
 ) {
-  const res = await fetch(
+  const res = await authFetch(
     '/api/interview/proctoring/event',
     {
       method: 'POST',
@@ -62,7 +63,7 @@ export async function sendProctoringEvent(
 }
 
 export async function getProctoringStatus(sessionId) {
-  const res = await fetch(
+  const res = await authFetch(
     `/api/interview/proctoring/status/${sessionId}`
   );
 
@@ -70,7 +71,7 @@ export async function getProctoringStatus(sessionId) {
 }
 
 export async function resumeProctoring(sessionId) {
-  const res = await fetch(
+  const res = await authFetch(
     `/api/interview/proctoring/resume/${sessionId}`,
     {
       method: 'POST',
@@ -81,7 +82,7 @@ export async function resumeProctoring(sessionId) {
 }
 
 export async function terminateProctoring(sessionId) {
-  const res = await fetch(
+  const res = await authFetch(
     `/api/interview/proctoring/terminate/${sessionId}`,
     {
       method: 'POST',
@@ -92,7 +93,7 @@ export async function terminateProctoring(sessionId) {
 }
 
 export async function getProctoringSummary(sessionId) {
-  const res = await fetch(
+  const res = await authFetch(
     `/api/interview/proctoring/summary/${sessionId}`
   );
 

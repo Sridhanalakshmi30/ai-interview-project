@@ -4,8 +4,10 @@ import json
 import time
 import random
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from groq import AuthenticationError
 
 from config.db import get_connection
+from services.access_service import issue_token
 from services.resume_parser import extract_text_from_file
 from services.groq_service import extract_resume_data
 
@@ -46,11 +48,17 @@ async def upload_resume(resume: UploadFile = File(...), name: str = Form(None), 
                VALUES (%s, %s, %s, %s, %s)""",
             (parsed.get("name") or name, email, resume.filename, raw_text, json.dumps(parsed)),
         )
-        conn.commit()
         candidate_id = cursor.lastrowid
+        access_token = issue_token(cursor, "candidate", candidate_id)
+        conn.commit()
         cursor.close()
 
-        return {"candidateId": candidate_id, "parsedResume": parsed}
+        return {"candidateId": candidate_id, "parsedResume": parsed, "accessToken": access_token}
+    except AuthenticationError:
+        raise HTTPException(
+            status_code=503,
+            detail="The interview AI service could not authenticate. The administrator must update GROQ_API_KEY and restart the backend, then retry the upload.",
+        )
     except ValueError as err:
         raise HTTPException(status_code=500, detail=str(err))
     except Exception as err:

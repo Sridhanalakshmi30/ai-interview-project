@@ -3,6 +3,7 @@ import os
 from typing import Dict, Any, Optional
 
 DEFAULT_MAX_VIOLATIONS = int(os.getenv("PROCTOR_MAX_VIOLATIONS", "4"))
+MULTI_FACE_TERMINATE_AT = 2
 
 VIOLATION_EVENTS = {
     "TAB_SWITCH",
@@ -13,10 +14,10 @@ VIOLATION_EVENTS = {
     "COPY_BLOCKED",
 }
 
-
 PAUSE_EVENTS = {
     "CAMERA_DISABLED",
     "MIC_DISABLED",
+    "VOICE_MISMATCH",
 }
 
 
@@ -25,6 +26,7 @@ def evaluate_event(
     current_violation_count: int,
     max_violations: int,
     metadata: Optional[Dict[str, Any]] = None,
+    previous_multiple_face_events: int = 0,
 ) -> Dict[str, Any]:
     """
     Evaluates an incoming proctoring event and determines the appropriate severity,
@@ -32,12 +34,49 @@ def evaluate_event(
     """
     event_type_upper = (event_type or "").strip().upper()
 
-    if event_type_upper in {"NO_FACE_DETECTED", "MULTIPLE_FACES_DETECTED"}:
+    if event_type_upper == "MULTIPLE_FACES_DETECTED":
+        occurrence = previous_multiple_face_events + 1
+        terminate = occurrence >= MULTI_FACE_TERMINATE_AT
+        reason = "MALPRACTICE: Multiple faces detected repeatedly during the interview."
         return {
-            "action": "INFO", "severity": "INFO", "new_status": "ACTIVE",
-            "violation_increment": 0, "new_violation_count": current_violation_count,
+            "action": "TERMINATE" if terminate else "FINAL_WARN",
+            "severity": "TERMINATE" if terminate else "WARNING",
+            "new_status": "TERMINATED" if terminate else "WARNING",
+            "violation_increment": 1,
+            "new_violation_count": current_violation_count + 1,
+            "paused_reason": reason if terminate else None,
+            "message": reason if terminate else (
+                ("This is your only multiple-face warning. " if MULTI_FACE_TERMINATE_AT == 2 else "") +
+                f"Multiple faces detected ({occurrence}/{MULTI_FACE_TERMINATE_AT}). "
+                f"{MULTI_FACE_TERMINATE_AT - occurrence} more occurrence(s) will end the interview "
+                "for malpractice. Ask the other person to leave now. "
+                "If they remain visible for 10 seconds, another occurrence will be counted."
+            ),
+        }
+
+    if event_type_upper == "NO_FACE_DETECTED":
+        return {
+            "action": "INFO",
+            "severity": "INFO",
+            "new_status": "ACTIVE",
+            "violation_increment": 0,
+            "new_violation_count": current_violation_count,
             "paused_reason": None,
             "message": "Camera detection needs review; no violation has been counted.",
+        }
+
+    if event_type_upper == "VOICE_MISMATCH":
+        # Voice mismatch persists after repeat voice check:
+        # Pause interview and flag for human review. DO NOT auto-reject or auto-terminate.
+        reason = "VOICE_MISMATCH_PENDING_REVIEW"
+        return {
+            "action": "PAUSE",
+            "severity": "PAUSE",
+            "new_status": "PAUSED",
+            "violation_increment": 0,
+            "new_violation_count": current_violation_count,
+            "paused_reason": reason,
+            "message": "Voice mismatch detected after repeat verification. Interview paused and flagged for human review.",
         }
 
     if event_type_upper in PAUSE_EVENTS:

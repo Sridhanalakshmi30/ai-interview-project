@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { startInterview, submitAnswer, requestNextQuestion } from '../api.js';
+import { startInterview, submitAnswer, requestNextQuestion, quitInterview, finishInterview } from '../api.js';
+import RepeatVoiceCheckModal from './proctoring/RepeatVoiceCheckModal.jsx';
+
 
 function speak(text) {
   if (!('speechSynthesis' in window)) return;
@@ -20,9 +22,14 @@ export default function Interview({
   candidateId,
   candidateName,
   onFinished,
+  onQuit,
   proctoring,
 }) {
   const [loading, setLoading] = useState(true);
+  const [confirmQuit, setConfirmQuit] = useState(false);
+  const [confirmFinish, setConfirmFinish] = useState(false);
+  const [quitting, setQuitting] = useState(false);
+  const quittingRef = useRef(false);
   const [error, setError] = useState('');
   const [sessionId, setSessionId] = useState(null);
   const [turnId, setTurnId] = useState(null);
@@ -35,17 +42,20 @@ export default function Interview({
   const [speechSupported, setSpeechSupported] = useState(true);
   const [lastTranscript, setLastTranscript] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  // Transient message shown when a paste/copy attempt is blocked.
   const [clipboardNotice, setClipboardNotice] = useState('');
   const [waitingForResume, setWaitingForResume] = useState(false);
 
+  // Voice Verification State
+  const [showRepeatVoiceCheck, setShowRepeatVoiceCheck] = useState(false);
+  const [pendingNextResult, setPendingNextResult] = useState(null);
 
   const recognitionRef = useRef(null);
+  const usedSpeechRef = useRef(false);
   const isSpeakingRef = useRef(false);
   const baseTextRef = useRef('');
   const timerRef = useRef(null);
 
-  // Start the interview once when the component mounts.
+  // Start the interview once when component mounts
   useEffect(() => {
     (async () => {
       try {
@@ -55,7 +65,7 @@ export default function Interview({
         setTurnNumber(result.turnNumber);
         setTopic(result.topic);
         setQuestionText(result.questionText);
-        setRemainingSeconds(result.remainingSeconds);
+        setRemainingSeconds(result.durationSeconds || result.remainingSeconds);
 
         if (proctoring && proctoring.registerSession) {
           proctoring.registerSession(result.sessionId);
@@ -106,12 +116,12 @@ export default function Interview({
     })();
   }, [waitingForResume, proctoring && proctoring.phase, sessionId]);
 
-  // Speak each new question aloud as it arrives.
+  // Speak each new question aloud
   useEffect(() => {
     if (questionText) speak(questionText);
   }, [questionText]);
 
-  // Client-side countdown display (server enforces the real cutoff on submit).
+  // Countdown display
   useEffect(() => {
     if (loading || remainingSeconds <= 0) return;
     timerRef.current = setInterval(() => {
@@ -120,7 +130,7 @@ export default function Interview({
     return () => clearInterval(timerRef.current);
   }, [loading, sessionId]);
 
-  // Cleanup speech recognition on unmount
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       window.speechSynthesis?.cancel();
@@ -133,10 +143,11 @@ export default function Interview({
         }
         recognitionRef.current = null;
       }
+
     };
   }, []);
 
-  function startSpeaking() {
+  async function startSpeaking() {
     setError('');
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -157,6 +168,7 @@ export default function Interview({
       let interim = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const transcript = event.results[i][0].transcript;
+        if (transcript.trim()) usedSpeechRef.current = true;
         if (event.results[i].isFinal) {
           baseTextRef.current += transcript + ' ';
         } else {
@@ -176,12 +188,11 @@ export default function Interview({
     };
 
     recognition.onend = () => {
-      // Auto-restart if user has not explicitly stopped speaking
       if (isSpeakingRef.current) {
         try {
           recognition.start();
         } catch (e) {
-          // ignore if already running
+          // ignore
         }
       }
     };
@@ -208,11 +219,14 @@ export default function Interview({
         // ignore
       }
     }
+
+
+
     setIsSpeaking(false);
     setTypedAnswer((prev) => prev.trim());
   }
 
-  // Auto-clear the clipboard notice a few seconds after it's shown.
+  // Auto-clear clipboard notice
   useEffect(() => {
     if (!clipboardNotice) return undefined;
     const t = setTimeout(() => setClipboardNotice(''), 4000);
@@ -225,25 +239,47 @@ export default function Interview({
     }
   }
 
-  // Answer box: block paste so an answer can't be copied in from elsewhere.
   function handleAnswerPaste(e) {
     e.preventDefault();
     reportGuardEvent('PASTE_BLOCKED');
     setClipboardNotice('Pasting is disabled during the interview — please type your answer.');
   }
 
-  // Question text (and the last-answer transcript): block copy/cut and the
-  // right-click menu so the question can't be lifted out elsewhere.
   function handleQuestionCopy(e) {
     e.preventDefault();
     reportGuardEvent('COPY_BLOCKED');
     setClipboardNotice('Copying the question is disabled during the interview.');
   }
 
+  function proceedWithNextTurn(result) {
+    setLastTranscript(result.transcript || typedAnswer);
+    setTypedAnswer('');
+    baseTextRef.current = '';
+    usedSpeechRef.current = false;
+
+    if (result.finished) {
+      onFinished(sessionId);
+      return;
+    }
+
+    if (result.proctoringPaused) {
+      setRemainingSeconds(result.remainingSeconds);
+      setWaitingForResume(true);
+      return;
+    }
+
+    setTurnId(result.nextTurn.turnId);
+    setTurnNumber(result.nextTurn.turnNumber);
+    setTopic(result.nextTurn.topic);
+    setQuestionText(result.nextTurn.questionText);
+    setRemainingSeconds(result.remainingSeconds);
+  }
+
   async function handleSubmitAnswer() {
+    if (quittingRef.current || confirmQuit || confirmFinish) return;
     if (proctoring && proctoring.isPaused) {
       setError(
-        'The interview is paused. Please resolve the camera/microphone issue above and resume before continuing.'
+        'The interview is paused. Please resolve the issue above and resume before continuing.'
       );
       return;
     }
@@ -263,28 +299,17 @@ export default function Interview({
     try {
       const result = await submitAnswer(sessionId, turnId, {
         answerText: answer,
+        answerSource: usedSpeechRef.current ? 'voice' : 'typed',
       });
 
-      setLastTranscript(result.transcript || answer);
-      setTypedAnswer('');
-      baseTextRef.current = '';
-
-      if (result.finished) {
-        onFinished(sessionId);
+      // If voice comparison flagged a mismatch on spoken audio:
+      if (result.voiceMismatch) {
+        setPendingNextResult(result);
+        setShowRepeatVoiceCheck(true);
         return;
       }
 
-      if (result.proctoringPaused) {
-        setRemainingSeconds(result.remainingSeconds);
-        setWaitingForResume(true);
-        return;
-      }
-
-      setTurnId(result.nextTurn.turnId);
-      setTurnNumber(result.nextTurn.turnNumber);
-      setTopic(result.nextTurn.topic);
-      setQuestionText(result.nextTurn.questionText);
-      setRemainingSeconds(result.remainingSeconds);
+      proceedWithNextTurn(result);
     } catch (err) {
       setError(err.message || 'Failed to submit your answer. Please try again.');
     } finally {
@@ -292,11 +317,55 @@ export default function Interview({
     }
   }
 
+  async function handleQuit() {
+    if (quittingRef.current || submitting) return;
+    quittingRef.current = true;
+    setQuitting(true);
+    setError('');
+    stopSpeaking();
+    window.speechSynthesis?.cancel();
+    try {
+      if (confirmFinish) await finishInterview(sessionId);
+      else await quitInterview(sessionId);
+          if (confirmFinish) onFinished(sessionId);
+      else onQuit();
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    } catch (err) {
+      setError(err.message || 'Could not end the interview. Please try again.');
+      quittingRef.current = false;
+      setQuitting(false);
+    }
+  }
+
+  function handleRepeatCheckVerified() {
+    setShowRepeatVoiceCheck(false);
+    if (pendingNextResult) {
+      proceedWithNextTurn(pendingNextResult);
+      setPendingNextResult(null);
+    }
+  }
+
+  function handleRepeatCheckMismatch(mismatchResult) {
+    setShowRepeatVoiceCheck(false);
+    setPendingNextResult(null);
+    if (proctoring && proctoring.reportViolation) {
+      proctoring.reportViolation('VOICE_MISMATCH', {
+        metadata: {
+          similarity: mismatchResult.similarity,
+          threshold: mismatchResult.threshold,
+          reason: 'VOICE_MISMATCH_PENDING_REVIEW',
+        },
+      });
+    }
+  }
+
   if (loading) {
     return (
       <div className="card">
         <h2>Preparing your interview…</h2>
-        <p className="hint">The AI is reading your resume and planning questions about your skills, internships, and projects.</p>
+        <p className="hint">
+          The AI is reading your resume and planning questions about your skills, internships, and projects.
+        </p>
       </div>
     );
   }
@@ -312,6 +381,10 @@ export default function Interview({
   return (
     <div className="card">
       <div className="interview-top">
+        <button type="button" className="secondary-btn small" disabled={submitting || quitting}
+          onClick={() => { stopSpeaking(); setConfirmQuit(true); }}>
+          Quit interview
+        </button>
         <span className="badge">Question {turnNumber}</span>
         <span className="badge topic-badge">{topic}</span>
         <span className="timer">⏱ {formatTime(remainingSeconds)}</span>
@@ -325,7 +398,9 @@ export default function Interview({
       >
         {questionText}
       </h2>
-      <button className="secondary-btn small" onClick={() => speak(questionText)}>🔊 Replay question</button>
+      <button className="secondary-btn small" onClick={() => speak(questionText)}>
+        🔊 Replay question
+      </button>
 
       {clipboardNotice && <p className="clipboard-notice">{clipboardNotice}</p>}
 
@@ -358,7 +433,12 @@ export default function Interview({
 
         <div className="voice-controls">
           {!isSpeaking ? (
-            <button type="button" className="secondary-btn" onClick={startSpeaking} disabled={submitting}>
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={startSpeaking}
+              disabled={submitting || (proctoring && proctoring.isPaused)}
+            >
               🎤 Speak answer
             </button>
           ) : (
@@ -370,11 +450,44 @@ export default function Interview({
 
         {error && <p className="error-text">{error}</p>}
 
-        <button className="primary-btn" onClick={handleSubmitAnswer} disabled={submitting}>
+        <button
+          className="primary-btn"
+          onClick={handleSubmitAnswer}
+          disabled={submitting || (proctoring && proctoring.isPaused)}
+        >
           {submitting ? 'Submitting…' : 'Submit Answer'}
         </button>
+        <button type="button" className="secondary-btn" style={{ marginTop: '0.75rem', width: '100%' }}
+          disabled={submitting || quitting || waitingForResume}
+          onClick={() => { stopSpeaking(); setError(''); setConfirmFinish(true); }}>
+          Finish interview &amp; view report
+        </button>
       </div>
+
+      {showRepeatVoiceCheck && (
+        <RepeatVoiceCheckModal
+          sessionId={sessionId}
+          questionNumber={turnNumber}
+          mediaStream={proctoring?.mediaStream}
+          onVerified={handleRepeatCheckVerified}
+          onMismatchPersists={handleRepeatCheckMismatch}
+        />
+      )}
+      {(confirmQuit || confirmFinish) && (
+        <div className="proctor-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="quit-title">
+          <div className="proctor-modal">
+            <h3 id="quit-title">{confirmFinish ? 'Finish this interview?' : 'Quit this interview?'}</h3>
+            <p>{confirmFinish
+              ? 'Your interview will end and a report will be generated from answers already submitted. Your current unfinished answer will not be included. To include it, choose Continue interview and submit it first.'
+              : 'Your submitted answers will be kept. Your current unfinished answer will be discarded, and this interview cannot be resumed.'}</p>
+            {error && <p className="error-text" role="alert">{error}</p>}
+            <button type="button" className="secondary-btn" disabled={quitting} onClick={() => { setConfirmQuit(false); setConfirmFinish(false); }} autoFocus>Continue interview</button>
+            <button type="button" className="primary-btn" disabled={quitting} onClick={handleQuit}>
+              {quitting ? 'Ending interview...' : confirmFinish ? 'Finish & view report' : 'Quit interview'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
-
 }

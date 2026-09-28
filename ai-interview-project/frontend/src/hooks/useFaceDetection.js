@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { loadFaceApiModels, isFaceApiLoaded, faceapi } from './faceApiLoader.js';
+import { createMultipleFaceTracker } from './multipleFaceTracker.js';
 
 export function useFaceDetection({
   videoRef,
@@ -7,12 +8,12 @@ export function useFaceDetection({
   onNoFaceDetected,
   onMultipleFacesDetected,
   onFaceOk,
-  detectionIntervalMs = 2000,
-  noFaceThreshold = 4,
-  multipleFaceThreshold = 3,
+  detectionIntervalMs = 500,
+  noFaceThreshold = 16,
 } = {}) {
+  const [detection, setDetection] = useState({ status: 'loading', count: null, boxes: [] });
   const noFaceCountRef = useRef(0);
-  const multipleFaceCountRef = useRef(0);
+  const multipleTrackerRef = useRef(createMultipleFaceTracker());
 
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
@@ -33,14 +34,17 @@ export function useFaceDetection({
   }, []);
 
   useEffect(() => {
-    if (!isActive) return;
+    if (!isActive) {
+      setDetection({ status: 'waiting', count: null, boxes: [] });
+      return;
+    }
 
     let isCancelled = false;
     let detecting = false;
     let reported = null;
     let healthyCount = 0;
     noFaceCountRef.current = 0;
-    multipleFaceCountRef.current = 0;
+    multipleTrackerRef.current.reset();
 
     const intervalId = setInterval(async () => {
       if (isCancelled || !isActiveRef.current) return;
@@ -58,8 +62,9 @@ export function useFaceDetection({
         video.videoWidth === 0
       ) {
         noFaceCountRef.current = 0;
-        multipleFaceCountRef.current = 0;
+        multipleTrackerRef.current.reset();
         healthyCount = 0;
+        setDetection({ status: 'waiting', count: null, boxes: [] });
         return;
       }
 
@@ -67,13 +72,16 @@ export function useFaceDetection({
       try {
         if (!isFaceApiLoaded()) {
           await loadFaceApiModels();
-          if (!isFaceApiLoaded()) return;
+          if (!isFaceApiLoaded()) {
+            setDetection({ status: 'error', count: null, boxes: [] });
+            return;
+          }
         }
         if (isCancelled || !isActiveRef.current) return;
 
-        const options = new faceapi.TinyFaceDetectorOptions({
-          inputSize: 416,
-          scoreThreshold: 0.5,
+        const options = new faceapi.SsdMobilenetv1Options({
+          minConfidence: 0.4,
+          maxResults: 10,
         });
 
         const detections = await faceapi.detectAllFaces(video, options);
@@ -83,16 +91,20 @@ export function useFaceDetection({
         // Ignore results if the camera stopped or the tab was hidden during inference.
         if (document.hidden || track.muted || track.readyState !== 'live' || !track.enabled) {
           noFaceCountRef.current = 0;
-          multipleFaceCountRef.current = 0;
+          multipleTrackerRef.current.reset();
           healthyCount = 0;
           return;
         }
         const count = detections.length;
+        setDetection({ status: 'active', count, boxes: detections.map(({ box }) => ({
+          x: box.x / video.videoWidth, y: box.y / video.videoHeight,
+          width: box.width / video.videoWidth, height: box.height / video.videoHeight,
+        })) });
+        const multipleOccurrence = multipleTrackerRef.current.sample(count, performance.now());
 
         if (count !== 1) healthyCount = 0;
         if (count === 0) {
           noFaceCountRef.current += 1;
-          multipleFaceCountRef.current = 0;
 
           if (noFaceCountRef.current >= noFaceThreshold && reported !== 'no-face') {
             if (onNoFaceRef.current) {
@@ -101,12 +113,12 @@ export function useFaceDetection({
             reported = 'no-face';
           }
         } else if (count > 1) {
-          multipleFaceCountRef.current += 1;
           noFaceCountRef.current = 0;
 
-          if (multipleFaceCountRef.current >= multipleFaceThreshold && reported !== 'multiple-faces') {
+          if (multipleOccurrence) {
             if (onMultipleFacesRef.current) {
-              onMultipleFacesRef.current({ faceCount: count });
+              await onMultipleFacesRef.current({ faceCount: count });
+              multipleTrackerRef.current.acknowledge(performance.now());
             }
             reported = 'multiple-faces';
           }
@@ -115,14 +127,15 @@ export function useFaceDetection({
           if (healthyCount >= 2) reported = null;
           // Exactly 1 face
           noFaceCountRef.current = 0;
-          multipleFaceCountRef.current = 0;
           if (onFaceOkRef.current) {
             onFaceOkRef.current();
           }
         }
       } catch (err) {
+        if (isCancelled) return;
+        setDetection({ status: 'error', count: null, boxes: [] });
         noFaceCountRef.current = 0;
-        multipleFaceCountRef.current = 0;
+        multipleTrackerRef.current.reset();
         healthyCount = 0;
         console.warn('Face detection execution error:', err);
       } finally {
@@ -134,5 +147,6 @@ export function useFaceDetection({
       isCancelled = true;
       clearInterval(intervalId);
     };
-  }, [isActive, videoRef, detectionIntervalMs, noFaceThreshold, multipleFaceThreshold]);
+  }, [isActive, videoRef, detectionIntervalMs, noFaceThreshold]);
+  return detection;
 }
