@@ -47,6 +47,16 @@ Open the whole `ai-interview-project` folder in VS Code (`File → Open Folder�
 
 ## Phase 2 — Configure and run the backend
 
+**Proctoring setup (all databases):** After creating the base tables, run
+`backend/db/proctoring_migration.sql` against the interview database. This creates
+`interview_proctoring_state` and `interview_proctoring_events` and can be run again
+safely. Both tables are required before starting an interview.
+
+**Existing databases:** If the database was created before the privacy consent feature,
+run `backend/db/migrations/001_candidate_consent.sql` once against that database.
+Running `schema.sql` again does not update existing tables. The migration adds
+`candidates.consent_given_at`; existing candidates must still give consent in the app.
+
 1. Make sure you have **Python 3.10+** (`python3 --version`). It's good practice to use a virtual environment:
    ```bash
    cd backend

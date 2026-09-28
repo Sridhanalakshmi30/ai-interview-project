@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   resume_filename VARCHAR(255),
   resume_raw_text LONGTEXT,
   parsed_resume JSON,
+  consent_given_at DATETIME NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

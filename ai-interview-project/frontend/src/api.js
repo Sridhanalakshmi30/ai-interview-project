@@ -3,7 +3,7 @@
 async function handleResponse(res) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || `Request failed with status ${res.status}`);
+    throw new Error(data.error || (typeof data.detail === 'string' && data.detail) || `Request failed with status ${res.status}`);
   }
   return data;
 }
@@ -12,6 +12,15 @@ export async function uploadResume(file) {
   const formData = new FormData();
   formData.append('resume', file);
   const res = await fetch('/api/resume/upload', { method: 'POST', body: formData });
+  return handleResponse(res);
+}
+
+export async function giveConsent(candidateId) {
+  const res = await fetch('/api/interview/consent', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ candidateId }),
+  });
   return handleResponse(res);
 }
 
@@ -31,6 +40,16 @@ export async function submitAnswer(sessionId, turnId, { answerText, audioBlob })
   if (audioBlob) formData.append('audio', audioBlob, 'answer.webm');
 
   const res = await fetch(`/api/interview/${sessionId}/answer`, { method: 'POST', body: formData });
+  return handleResponse(res);
+}
+
+export async function requestNextQuestion(sessionId) {
+  const res = await fetch(
+    `/api/interview/${sessionId}/next-question`,
+    {
+      method: 'POST',
+    }
+  );
   return handleResponse(res);
 }
 

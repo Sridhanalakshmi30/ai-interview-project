@@ -10,6 +10,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 
 from config.db import get_connection
+from services import proctoring_service
 from services.groq_service import (
     generate_interview_plan,
     generate_next_question,
@@ -19,6 +20,7 @@ from services.groq_service import (
 )
 
 router = APIRouter()
+
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -34,6 +36,32 @@ class StartInterviewRequest(BaseModel):
     durationMinutes: Optional[int] = None
 
 
+class ConsentRequest(BaseModel):
+    candidateId: int
+
+
+@router.post("/consent")
+def record_consent(payload: ConsentRequest):
+    conn = get_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "UPDATE candidates SET consent_given_at = COALESCE(consent_given_at, UTC_TIMESTAMP()) WHERE id = %s",
+            (payload.candidateId,),
+        )
+        cursor.execute("SELECT consent_given_at FROM candidates WHERE id = %s", (payload.candidateId,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Candidate not found.")
+        conn.commit()
+        return {"candidateId": payload.candidateId, "consentGivenAt": row["consent_given_at"].isoformat() + "Z"}
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conn.close()
+
+
 def _load_json_field(value):
     if value is None:
         return None
@@ -42,7 +70,7 @@ def _load_json_field(value):
     return json.loads(value)
 
 
-def get_candidate_resume(candidate_id: int) -> dict:
+def get_candidate_resume(candidate_id: int, require_consent: bool = False) -> dict:
     conn = get_connection()
     try:
         cursor = conn.cursor(dictionary=True)
@@ -51,6 +79,8 @@ def get_candidate_resume(candidate_id: int) -> dict:
         cursor.close()
         if not row:
             raise ValueError("Candidate not found.")
+        if require_consent and not row.get("consent_given_at"):
+            raise HTTPException(status_code=403, detail="Please agree to the privacy and monitoring notice before starting the interview.")
         return _load_json_field(row["parsed_resume"])
     finally:
         conn.close()
@@ -143,7 +173,7 @@ def pick_next_topic(plan: dict, current_index: int, decision: str, history_rows:
 def start_interview(payload: StartInterviewRequest):
     conn = None
     try:
-        parsed_resume = get_candidate_resume(payload.candidateId)
+        parsed_resume = get_candidate_resume(payload.candidateId, require_consent=True)
         duration = payload.durationMinutes or DEFAULT_DURATION
 
         plan = generate_interview_plan(parsed_resume, duration)
@@ -183,6 +213,8 @@ def start_interview(payload: StartInterviewRequest):
             "durationSeconds": duration * 60,
             "remainingSeconds": duration * 60,
         }
+    except HTTPException:
+        raise
     except ValueError as err:
         raise HTTPException(status_code=400, detail=str(err))
     except Exception as err:
@@ -273,16 +305,30 @@ async def submit_answer(
 
         if remaining_seconds <= 0 or reached_question_cap:
             cursor.execute(
-                "UPDATE interview_sessions SET status = 'completed', ended_at = NOW() WHERE id = %s",
+                "UPDATE interview_sessions SET status = 'completed', ended_at = NOW() WHERE id = %s AND status = 'in_progress'",
                 (session_id,),
             )
+            completed = cursor.rowcount
             conn.commit()
             cursor.close()
+            if not completed:
+                raise HTTPException(status_code=409, detail="This interview has already ended.")
+            proctoring_service.mark_completed(session_id)
             return {
                 "finished": True,
                 "transcript": final_answer_text,
                 "evaluation": evaluation,
                 "remainingSeconds": 0,
+            }
+
+        if not proctoring_service.is_active(session_id):
+            cursor.close()
+            return {
+                "finished": False,
+                "proctoringPaused": True,
+                "transcript": final_answer_text,
+                "evaluation": evaluation,
+                "remainingSeconds": remaining_seconds,
             }
 
         cursor.execute(
@@ -345,6 +391,140 @@ async def submit_answer(
             conn.close()
         if audio_path and os.path.exists(audio_path):
             os.remove(audio_path)
+
+
+@router.post("/{session_id}/next-question")
+def request_next_question(session_id: int):
+    conn = None
+    try:
+        if not proctoring_service.is_active(session_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Proctoring is not ACTIVE for this session."
+            )
+
+        session = get_session(session_id)
+        if session["status"] != "in_progress":
+            raise HTTPException(
+                status_code=400,
+                detail="This interview session has already ended."
+            )
+
+        conn = get_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM interview_turns
+            WHERE session_id = %s
+            ORDER BY turn_number DESC
+            LIMIT 1
+            """,
+            (session_id,)
+        )
+        latest_turn = cursor.fetchone()
+
+        elapsed_seconds = (datetime.now() - session["started_at"]).total_seconds()
+        duration_seconds = session["duration_minutes"] * 60
+        remaining_seconds = max(0, int(duration_seconds - elapsed_seconds))
+
+        if latest_turn and latest_turn["answer_text"] is None:
+            cursor.close()
+            return {
+                "nextTurn": {
+                    "turnId": latest_turn["id"],
+                    "turnNumber": latest_turn["turn_number"],
+                    "topic": latest_turn["topic"],
+                    "questionText": latest_turn["question_text"],
+                },
+                "remainingSeconds": remaining_seconds,
+            }
+
+        parsed_resume = get_candidate_resume(session["candidate_id"])
+
+        cursor.execute(
+            """
+            SELECT topic, question_text, answer_text, technical_score, depth_score, relevance_score
+            FROM interview_turns
+            WHERE session_id = %s AND answer_text IS NOT NULL
+            ORDER BY turn_number ASC
+            """,
+            (session_id,)
+        )
+        history_rows = cursor.fetchall()
+
+        last_decision = latest_turn["adaptive_decision"] if latest_turn else "new_topic"
+
+        next_topic_info = pick_next_topic(
+            session["interview_plan"],
+            session["current_topic_index"],
+            last_decision,
+            history_rows
+        )
+
+        next_question = generate_next_question(
+            parsed_resume,
+            session["interview_plan"],
+            history_rows,
+            next_topic_info["name"]
+        )
+
+        next_turn_number = session["question_count"] + 1
+
+        cursor.execute(
+            """
+            INSERT INTO interview_turns (session_id, turn_number, topic, question_text)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                session_id,
+                next_turn_number,
+                next_topic_info["name"],
+                next_question["question_text"]
+            )
+        )
+        conn.commit()
+        next_turn_id = cursor.lastrowid
+
+        cursor.execute(
+            """
+            UPDATE interview_sessions
+            SET question_count = %s, current_topic_index = %s
+            WHERE id = %s
+            """,
+            (
+                next_turn_number,
+                next_topic_info["index"],
+                session_id
+            )
+        )
+        conn.commit()
+        cursor.close()
+
+        return {
+            "nextTurn": {
+                "turnId": next_turn_id,
+                "turnNumber": next_turn_number,
+                "topic": next_topic_info["name"],
+                "questionText": next_question["question_text"],
+            },
+            "remainingSeconds": remaining_seconds,
+        }
+    except HTTPException:
+        raise
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    except Exception as err:
+        print(f"[interview/next-question] error: {err}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(err) or "Failed to generate the next question."
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
 
 
 @router.get("/{session_id}/report")

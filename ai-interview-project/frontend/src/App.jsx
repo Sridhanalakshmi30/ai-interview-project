@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import ResumeUpload from './components/ResumeUpload.jsx';
 import Interview from './components/Interview.jsx';
 import Report from './components/Report.jsx';
+import ProctoringGuard from './components/proctoring/ProctoringGuard.jsx';
+import PrivacyConsent from './components/proctoring/PrivacyConsent.jsx';
 
 export default function App() {
-  // step: 'upload' -> 'interview' -> 'report'
   const [step, setStep] = useState('upload');
   const [candidateId, setCandidateId] = useState(null);
   const [candidateName, setCandidateName] = useState('');
@@ -13,7 +14,7 @@ export default function App() {
   function handleResumeReady(id, name) {
     setCandidateId(id);
     setCandidateName(name || 'Candidate');
-    setStep('interview');
+    setStep('consent');
   }
 
   function handleInterviewFinished(finishedSessionId) {
@@ -37,14 +38,37 @@ export default function App() {
 
       <main className="app-main">
         {step === 'upload' && <ResumeUpload onReady={handleResumeReady} />}
-        {step === 'interview' && (
-          <Interview
-            candidateId={candidateId}
-            candidateName={candidateName}
-            onFinished={handleInterviewFinished}
-          />
+
+        {step === 'consent' && (
+          <PrivacyConsent candidateId={candidateId} onAccepted={() => setStep('interview')}
+            onDeclined={() => setStep('declined')} />
         )}
-        {step === 'report' && <Report sessionId={sessionId} onRestart={handleRestart} />}
+
+        {step === 'declined' && (
+          <section className="card" aria-labelledby="consent-declined-title">
+            <h2 id="consent-declined-title">Interview cannot proceed</h2>
+            <p>You declined the monitoring notice. Consent is required to take this interview.</p>
+            <p>No camera or microphone access was requested, and monitoring has not started.</p>
+            <button className="secondary-btn" onClick={handleRestart}>Return to resume upload</button>
+          </section>
+        )}
+
+        {step === 'interview' && (
+          <ProctoringGuard key={candidateId}>
+            {(proctoring) => (
+              <Interview
+                candidateId={candidateId}
+                candidateName={candidateName}
+                onFinished={handleInterviewFinished}
+                proctoring={proctoring}
+              />
+            )}
+          </ProctoringGuard>
+        )}
+
+        {step === 'report' && (
+          <Report sessionId={sessionId} onRestart={handleRestart} />
+        )}
       </main>
     </div>
   );

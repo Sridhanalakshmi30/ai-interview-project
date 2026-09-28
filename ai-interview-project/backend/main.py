@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config.db import init_pool
-from routers import resume, interview
+from routers import resume, interview, proctoring
 
 
 @asynccontextmanager
@@ -32,6 +32,8 @@ app.add_middleware(
 
 app.include_router(resume.router, prefix="/api/resume", tags=["resume"])
 app.include_router(interview.router, prefix="/api/interview", tags=["interview"])
+app.include_router(proctoring.router, prefix="/api/interview/proctoring", tags=["proctoring"])
+
 
 
 @app.get("/api/health")

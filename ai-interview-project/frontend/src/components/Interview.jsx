@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { startInterview, submitAnswer } from '../api.js';
+import { startInterview, submitAnswer, requestNextQuestion } from '../api.js';
 
 function speak(text) {
   if (!('speechSynthesis' in window)) return;
@@ -16,7 +16,12 @@ function formatTime(totalSeconds) {
   return `${m}:${s}`;
 }
 
-export default function Interview({ candidateId, candidateName, onFinished }) {
+export default function Interview({
+  candidateId,
+  candidateName,
+  onFinished,
+  proctoring,
+}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [sessionId, setSessionId] = useState(null);
@@ -30,6 +35,10 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
   const [speechSupported, setSpeechSupported] = useState(true);
   const [lastTranscript, setLastTranscript] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  // Transient message shown when a paste/copy attempt is blocked.
+  const [clipboardNotice, setClipboardNotice] = useState('');
+  const [waitingForResume, setWaitingForResume] = useState(false);
+
 
   const recognitionRef = useRef(null);
   const isSpeakingRef = useRef(false);
@@ -47,6 +56,10 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
         setTopic(result.topic);
         setQuestionText(result.questionText);
         setRemainingSeconds(result.remainingSeconds);
+
+        if (proctoring && proctoring.registerSession) {
+          proctoring.registerSession(result.sessionId);
+        }
       } catch (err) {
         setError(err.message || 'Could not start the interview.');
       } finally {
@@ -55,6 +68,43 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Update proctoring with question turn number
+  useEffect(() => {
+    if (proctoring && proctoring.setQuestionNumber) {
+      proctoring.setQuestionNumber(turnNumber);
+    }
+  }, [turnNumber, proctoring]);
+
+  // Handle resume when proctoring was paused and now returns to ACTIVE
+  useEffect(() => {
+    if (!waitingForResume) {
+      return;
+    }
+
+    if (!proctoring || proctoring.phase !== 'ACTIVE') {
+      return;
+    }
+
+    (async () => {
+      try {
+        const result = await requestNextQuestion(sessionId);
+
+        setTurnId(result.nextTurn.turnId);
+        setTurnNumber(result.nextTurn.turnNumber);
+        setTopic(result.nextTurn.topic);
+        setQuestionText(result.nextTurn.questionText);
+
+        if (typeof result.remainingSeconds === 'number') {
+          setRemainingSeconds(result.remainingSeconds);
+        }
+      } catch (err) {
+        setError(err.message || 'Could not resume the interview.');
+      } finally {
+        setWaitingForResume(false);
+      }
+    })();
+  }, [waitingForResume, proctoring && proctoring.phase, sessionId]);
 
   // Speak each new question aloud as it arrives.
   useEffect(() => {
@@ -73,6 +123,7 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
   // Cleanup speech recognition on unmount
   useEffect(() => {
     return () => {
+      window.speechSynthesis?.cancel();
       isSpeakingRef.current = false;
       if (recognitionRef.current) {
         try {
@@ -161,7 +212,42 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
     setTypedAnswer((prev) => prev.trim());
   }
 
+  // Auto-clear the clipboard notice a few seconds after it's shown.
+  useEffect(() => {
+    if (!clipboardNotice) return undefined;
+    const t = setTimeout(() => setClipboardNotice(''), 4000);
+    return () => clearTimeout(t);
+  }, [clipboardNotice]);
+
+  function reportGuardEvent(eventType) {
+    if (proctoring && proctoring.reportViolation) {
+      proctoring.reportViolation(eventType);
+    }
+  }
+
+  // Answer box: block paste so an answer can't be copied in from elsewhere.
+  function handleAnswerPaste(e) {
+    e.preventDefault();
+    reportGuardEvent('PASTE_BLOCKED');
+    setClipboardNotice('Pasting is disabled during the interview — please type your answer.');
+  }
+
+  // Question text (and the last-answer transcript): block copy/cut and the
+  // right-click menu so the question can't be lifted out elsewhere.
+  function handleQuestionCopy(e) {
+    e.preventDefault();
+    reportGuardEvent('COPY_BLOCKED');
+    setClipboardNotice('Copying the question is disabled during the interview.');
+  }
+
   async function handleSubmitAnswer() {
+    if (proctoring && proctoring.isPaused) {
+      setError(
+        'The interview is paused. Please resolve the camera/microphone issue above and resume before continuing.'
+      );
+      return;
+    }
+
     if (isSpeakingRef.current) {
       stopSpeaking();
     }
@@ -185,6 +271,12 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
 
       if (result.finished) {
         onFinished(sessionId);
+        return;
+      }
+
+      if (result.proctoringPaused) {
+        setRemainingSeconds(result.remainingSeconds);
+        setWaitingForResume(true);
         return;
       }
 
@@ -225,11 +317,25 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
         <span className="timer">⏱ {formatTime(remainingSeconds)}</span>
       </div>
 
-      <h2 className="question-text">{questionText}</h2>
+      <h2
+        className="question-text no-select"
+        onCopy={handleQuestionCopy}
+        onCut={handleQuestionCopy}
+        onContextMenu={handleQuestionCopy}
+      >
+        {questionText}
+      </h2>
       <button className="secondary-btn small" onClick={() => speak(questionText)}>🔊 Replay question</button>
 
+      {clipboardNotice && <p className="clipboard-notice">{clipboardNotice}</p>}
+
       {lastTranscript && (
-        <div className="transcript-preview">
+        <div
+          className="transcript-preview no-select"
+          onCopy={handleQuestionCopy}
+          onCut={handleQuestionCopy}
+          onContextMenu={handleQuestionCopy}
+        >
           <strong>Your last answer:</strong> {lastTranscript}
         </div>
       )}
@@ -246,7 +352,8 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
             baseTextRef.current = e.target.value;
           }}
           placeholder="Type here, or click Speak answer below…"
-          disabled={submitting}
+          disabled={submitting || (proctoring && proctoring.isPaused)}
+          onPaste={handleAnswerPaste}
         />
 
         <div className="voice-controls">
@@ -269,4 +376,5 @@ export default function Interview({ candidateId, candidateName, onFinished }) {
       </div>
     </div>
   );
+
 }
