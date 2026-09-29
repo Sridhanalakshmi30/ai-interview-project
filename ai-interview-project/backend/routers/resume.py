@@ -19,6 +19,27 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 ALLOWED_EXTENSIONS = {".pdf", ".docx"}
 
 
+@router.post("/role-candidate")
+def create_role_candidate():
+    """Create the candidate record required by a role-only interview."""
+    conn = get_connection()
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO candidates (name, parsed_resume) VALUES (%s, %s)",
+            ("Candidate", json.dumps({})),
+        )
+        candidate_id = cursor.lastrowid
+        access_token = issue_token(cursor, "candidate", candidate_id)
+        conn.commit()
+        return {"candidateId": candidate_id, "accessToken": access_token}
+    finally:
+        if cursor is not None:
+            cursor.close()
+        conn.close()
+
+
 @router.post("/upload")
 async def upload_resume(resume: UploadFile = File(...), name: str = Form(None), email: str = Form(None)):
     ext = os.path.splitext(resume.filename)[1].lower()

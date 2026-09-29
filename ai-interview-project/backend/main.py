@@ -31,6 +31,7 @@ app.add_middleware(
 )
 
 app.include_router(resume.router, prefix="/api/resume", tags=["resume"])
+app.include_router(interview.public_router, prefix="/api/interview", tags=["interview"])
 app.include_router(interview.router, prefix="/api/interview", tags=["interview"])
 app.include_router(proctoring.router, prefix="/api/interview/proctoring", tags=["proctoring"])
 

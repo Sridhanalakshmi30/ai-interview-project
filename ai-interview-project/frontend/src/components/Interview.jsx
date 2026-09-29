@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { startInterview, submitAnswer, requestNextQuestion, quitInterview, finishInterview } from '../api.js';
+import { startInterview, submitAnswer, requestNextQuestion, quitInterview } from '../api.js';
 import RepeatVoiceCheckModal from './proctoring/RepeatVoiceCheckModal.jsx';
 
 
@@ -24,10 +24,10 @@ export default function Interview({
   onFinished,
   onQuit,
   proctoring,
+  roleKey,
 }) {
   const [loading, setLoading] = useState(true);
   const [confirmQuit, setConfirmQuit] = useState(false);
-  const [confirmFinish, setConfirmFinish] = useState(false);
   const [quitting, setQuitting] = useState(false);
   const quittingRef = useRef(false);
   const [error, setError] = useState('');
@@ -59,7 +59,7 @@ export default function Interview({
   useEffect(() => {
     (async () => {
       try {
-        const result = await startInterview(candidateId, undefined);
+        const result = await startInterview(candidateId, undefined, roleKey);
         setSessionId(result.sessionId);
         setTurnId(result.turnId);
         setTurnNumber(result.turnNumber);
@@ -276,7 +276,7 @@ export default function Interview({
   }
 
   async function handleSubmitAnswer() {
-    if (quittingRef.current || confirmQuit || confirmFinish) return;
+    if (quittingRef.current || confirmQuit) return;
     if (proctoring && proctoring.isPaused) {
       setError(
         'The interview is paused. Please resolve the issue above and resume before continuing.'
@@ -325,10 +325,8 @@ export default function Interview({
     stopSpeaking();
     window.speechSynthesis?.cancel();
     try {
-      if (confirmFinish) await finishInterview(sessionId);
-      else await quitInterview(sessionId);
-          if (confirmFinish) onFinished(sessionId);
-      else onQuit();
+      await quitInterview(sessionId);
+      onQuit();
       if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     } catch (err) {
       setError(err.message || 'Could not end the interview. Please try again.');
@@ -381,11 +379,10 @@ export default function Interview({
   return (
     <div className="card">
       <div className="interview-top">
-        <button type="button" className="secondary-btn small" disabled={submitting || quitting}
-          onClick={() => { stopSpeaking(); setConfirmQuit(true); }}>
-          Quit interview
-        </button>
-        <span className="badge">Question {turnNumber}</span>
+        <span className="badge">
+          {roleKey?.startsWith('fresher:') ? 'Type 3: Fresher Role-Based' : roleKey ? 'Type 2: Experienced Role-Based' : 'Type 1: Resume-Based'}
+        </span>
+        <span className="badge">Question {turnNumber} of 15</span>
         <span className="badge topic-badge">{topic}</span>
         <span className="timer">⏱ {formatTime(remainingSeconds)}</span>
       </div>
@@ -457,10 +454,9 @@ export default function Interview({
         >
           {submitting ? 'Submitting…' : 'Submit Answer'}
         </button>
-        <button type="button" className="secondary-btn" style={{ marginTop: '0.75rem', width: '100%' }}
-          disabled={submitting || quitting || waitingForResume}
-          onClick={() => { stopSpeaking(); setError(''); setConfirmFinish(true); }}>
-          Finish interview &amp; view report
+        <button type="button" className="secondary-btn quit-interview-btn" disabled={submitting || quitting}
+          onClick={() => { stopSpeaking(); setConfirmQuit(true); }}>
+          Quit interview
         </button>
       </div>
 
@@ -473,17 +469,15 @@ export default function Interview({
           onMismatchPersists={handleRepeatCheckMismatch}
         />
       )}
-      {(confirmQuit || confirmFinish) && (
-        <div className="proctor-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="quit-title">
+      {confirmQuit && (
+        <div className="proctor-modal-overlay quit-confirmation" role="dialog" aria-modal="true" aria-labelledby="quit-title">
           <div className="proctor-modal">
-            <h3 id="quit-title">{confirmFinish ? 'Finish this interview?' : 'Quit this interview?'}</h3>
-            <p>{confirmFinish
-              ? 'Your interview will end and a report will be generated from answers already submitted. Your current unfinished answer will not be included. To include it, choose Continue interview and submit it first.'
-              : 'Your submitted answers will be kept. Your current unfinished answer will be discarded, and this interview cannot be resumed.'}</p>
+            <h3 id="quit-title">Quit this interview?</h3>
+            <p>Your submitted answers will be kept. Your current unfinished answer will be discarded, and this interview cannot be resumed.</p>
             {error && <p className="error-text" role="alert">{error}</p>}
-            <button type="button" className="secondary-btn" disabled={quitting} onClick={() => { setConfirmQuit(false); setConfirmFinish(false); }} autoFocus>Continue interview</button>
+            <button type="button" className="secondary-btn" disabled={quitting} onClick={() => setConfirmQuit(false)} autoFocus>Continue interview</button>
             <button type="button" className="primary-btn" disabled={quitting} onClick={handleQuit}>
-              {quitting ? 'Ending interview...' : confirmFinish ? 'Finish & view report' : 'Quit interview'}
+              {quitting ? 'Ending interview...' : 'Quit interview'}
             </button>
           </div>
         </div>

@@ -40,3 +40,14 @@ test('session requests use only their matching token', async () => {
   };
   await authFetch('/api/interview/12/report');
 });
+
+test('role-only candidate stores its credential without a resume', async () => {
+  tokens.clear();
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, '/api/resume/role-candidate');
+    assert.equal(options.headers.get('Authorization'), null);
+    return Response.json({ candidateId: 23, accessToken: 'role-candidate-secret' });
+  };
+  await authFetch('/api/resume/role-candidate', { method: 'POST' });
+  assert.equal(tokens.get('interview:candidate:23'), 'role-candidate-secret');
+});

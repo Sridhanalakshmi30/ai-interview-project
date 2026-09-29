@@ -16,6 +16,8 @@ class AnswerScoringTests(unittest.TestCase):
         self.assertEqual(result['technical_score'], 6.8)
         self.assertEqual(result['depth_score'], 6.2)
         self.assertEqual(result['relevance_score'], 7.4)
+        self.assertIn('medium, balanced interview rubric', call.call_args.kwargs['system_prompt'])
+        self.assertIn('medium rubric', result['rationale'])
 
     @patch('services.groq_service._call_groq_json')
     def test_empty_answer_receives_zero_without_model_call(self, call):

@@ -16,6 +16,10 @@ export async function uploadResume(file) {
   return handleResponse(res);
 }
 
+export async function createRoleCandidate() {
+  return handleResponse(await authFetch('/api/resume/role-candidate', { method: 'POST' }));
+}
+
 export async function giveConsent(candidateId) {
   const res = await authFetch('/api/interview/consent', {
     method: 'POST',
@@ -25,12 +29,17 @@ export async function giveConsent(candidateId) {
   return handleResponse(res);
 }
 
-export async function startInterview(candidateId, durationMinutes) {
+export async function startInterview(candidateId, durationMinutes, roleKey = null) {
   const res = await authFetch('/api/interview/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ candidateId, durationMinutes }),
+    body: JSON.stringify({ candidateId, durationMinutes, roleKey }),
   });
+  return handleResponse(res);
+}
+
+export async function getRoles() {
+  const res = await authFetch('/api/interview/roles');
   return handleResponse(res);
 }
 
@@ -110,10 +119,5 @@ export async function getReport(sessionId) {
 
 export async function quitInterview(sessionId) {
   const res = await authFetch(`/api/interview/${sessionId}/quit`, { method: 'POST' });
-  return handleResponse(res);
-}
-
-export async function finishInterview(sessionId) {
-  const res = await authFetch(`/api/interview/${sessionId}/finish`, { method: 'POST' });
   return handleResponse(res);
 }

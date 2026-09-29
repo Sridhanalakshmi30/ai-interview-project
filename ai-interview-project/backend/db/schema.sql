@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE TABLE IF NOT EXISTS interview_sessions (
   id INT AUTO_INCREMENT PRIMARY KEY,
   candidate_id INT NOT NULL,
+  role_key VARCHAR(64) NULL,
   interview_plan JSON,
   status ENUM('in_progress','completed','abandoned') DEFAULT 'in_progress',
   started_at DATETIME,

@@ -1,6 +1,15 @@
 # AI Interview Module — Full Development Guide
 
-A resume-based adaptive AI interview system.
+A resume-based and experienced role-based adaptive AI interview system.
+
+Candidates first choose an interview type. Resume-based interviews require a resume
+upload. Role-based interviews skip the upload and cover the core topics for one of nine roles.
+Fresher role-based interviews also skip the upload and use easy-to-moderate fundamentals for the selected role.
+Experienced role-based interviews use intermediate questions for every role.
+All three interview types ask exactly 15 questions before generating the report.
+All answers use the same medium evaluation rubric with partial credit for correct concepts.
+For existing databases, run `backend/db/migrations/003_role_based.sql` once before
+using this update. Fresh databases include the role column in `backend/db/schema.sql`.
 - **AI engine:** Groq only (LLM for questions/scoring, Groq Whisper for voice transcription)
 - **AI voice output:** Browser's built-in speech synthesis (no extra paid voice API)
 - **Database:** MySQL

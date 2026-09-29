@@ -56,6 +56,9 @@ export default function Report({ sessionId, onRestart }) {
   return (
     <div className="card">
       <h2>Interview Report</h2>
+      <p className="hint" style={{ marginTop: '-0.5rem', marginBottom: '1.25rem' }}>
+        Interview Type: <strong>{report.role_key?.startsWith('fresher:') ? `Type 3 — Fresher Role-Based (${report.role_key.slice(8)})` : report.role_key ? `Type 2 — Experienced Role-Based (${report.role_key})` : 'Type 1 — Resume-Based'}</strong>
+      </p>
 
       <div className="overall-score">
         <span className="score-number">{report.overall_score}</span>

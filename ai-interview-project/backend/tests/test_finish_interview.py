@@ -12,7 +12,7 @@ class FinishInterviewTests(unittest.TestCase):
             conn = connect.return_value
             cursor = conn.cursor.return_value
             cursor.fetchone.side_effect = [
-                {'candidate_id': 4, 'status': status}, {'status': 'ACTIVE'}, {'count': 2},
+                {'candidate_id': 4, 'status': status}, {'status': 'ACTIVE'}, {'count': 15},
             ]
             self.assertTrue(finish_interview(12)['finished'])
             sql = cursor.execute.call_args_list[-2].args[0]
@@ -26,7 +26,7 @@ class FinishInterviewTests(unittest.TestCase):
             ([None], 404),
             ([{'candidate_id': 4, 'status': 'abandoned'}], 409),
             ([{'candidate_id': 4, 'status': 'in_progress'}, {'status': 'TERMINATED'}], 409),
-            ([{'candidate_id': 4, 'status': 'in_progress'}, {'status': 'ACTIVE'}, {'count': 0}], 400),
+            ([{'candidate_id': 4, 'status': 'in_progress'}, {'status': 'ACTIVE'}, {'count': 14}], 400),
         ]
         for rows, expected in scenarios:
             conn = connect.return_value

@@ -38,7 +38,7 @@ export default function ResumeUpload({ onReady }) {
 
   return (
     <div className="card">
-      <h2>Step 1 — Upload your resume</h2>
+      <h2>Step 2 — Upload your resume</h2>
       <p className="hint">
         Upload your resume as a PDF or Word document. The AI will read it and build interview
         questions about your technical skills, internships, and projects.

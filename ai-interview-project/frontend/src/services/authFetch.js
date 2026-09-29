@@ -14,9 +14,9 @@ export async function authFetch(url, options = {}) {
   const token = id && sessionStorage.getItem(`interview:${scope}:${id}`);
   if (token) headers.set('Authorization', `Bearer ${token}`);
   const response = await fetch(url, { ...options, headers });
-  if (response.ok && (path === '/api/resume/upload' || path === '/api/interview/start')) {
+  if (response.ok && (path === '/api/resume/upload' || path === '/api/resume/role-candidate' || path === '/api/interview/start')) {
     const data = await response.clone().json();
-    const issuedScope = path === '/api/resume/upload' ? 'candidate' : 'session';
+    const issuedScope = path.startsWith('/api/resume/') ? 'candidate' : 'session';
     const issuedId = issuedScope === 'candidate' ? data.candidateId : data.sessionId;
     if (data.accessToken) sessionStorage.setItem(`interview:${issuedScope}:${issuedId}`, data.accessToken);
   }

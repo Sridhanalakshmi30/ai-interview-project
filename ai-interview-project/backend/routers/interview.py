@@ -10,6 +10,7 @@ from fastapi import Depends, APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 
 from config.db import get_connection
+from data.role_profiles import get_role_profile, list_roles
 from services import proctoring_service, voice_verification_service
 from services.groq_service import (
     generate_interview_plan,
@@ -22,6 +23,14 @@ from services.groq_service import (
 from services.access_service import require_owner, issue_token
 
 router = APIRouter(dependencies=[Depends(require_owner)])
+public_router = APIRouter()
+
+
+@public_router.get("/roles")
+def get_roles():
+    return {"roles": list_roles()}
+
+
 VOICE_CHECK_ENABLED = os.getenv("VOICE_CHECK_ENABLED", "false").strip().lower() == "true"
 
 
@@ -29,7 +38,7 @@ UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 DEFAULT_DURATION = int(os.getenv("INTERVIEW_DURATION_MINUTES", "15"))
-MAX_QUESTIONS = int(os.getenv("MAX_QUESTIONS", "15"))
+MAX_QUESTIONS = 15
 TECHNICAL_QUESTION_TARGET = int(os.getenv("TECHNICAL_QUESTION_TARGET", "10"))
 PROJECT_INTERNSHIP_TARGET = int(os.getenv("PROJECT_INTERNSHIP_TARGET", "5"))
 
@@ -37,6 +46,7 @@ PROJECT_INTERNSHIP_TARGET = int(os.getenv("PROJECT_INTERNSHIP_TARGET", "5"))
 class StartInterviewRequest(BaseModel):
     candidateId: int
     durationMinutes: Optional[int] = None
+    roleKey: Optional[str] = None
 
 
 class ConsentRequest(BaseModel):
@@ -92,8 +102,8 @@ def finish_interview(session_id: int):
         if state and state['status'] == 'TERMINATED':
             raise HTTPException(status_code=409, detail="This interview has already been terminated.")
         cursor.execute("SELECT COUNT(*) AS count FROM interview_turns WHERE session_id = %s AND answered_at IS NOT NULL", (session_id,))
-        if cursor.fetchone()['count'] == 0:
-            raise HTTPException(status_code=400, detail="Submit at least one answer before finishing the interview.")
+        if cursor.fetchone()['count'] < MAX_QUESTIONS:
+            raise HTTPException(status_code=400, detail="Answer all 15 questions before finishing the interview.")
         cursor.execute("UPDATE interview_sessions SET status = 'completed', ended_at = NOW() WHERE id = %s AND status = 'in_progress'", (session_id,))
         cursor.execute("UPDATE interview_proctoring_state SET status = 'COMPLETED' WHERE session_id = %s AND status != 'TERMINATED'", (session_id,))
         conn.commit()
@@ -382,18 +392,19 @@ def pick_next_topic(plan: dict, current_index: int, decision: str, history_rows:
 def start_interview(payload: StartInterviewRequest):
     conn = None
     try:
+        role_profile = get_role_profile(payload.roleKey) if payload.roleKey is not None else None
         parsed_resume = get_candidate_resume(payload.candidateId, require_consent=True)
         duration = payload.durationMinutes or DEFAULT_DURATION
 
-        plan = generate_interview_plan(parsed_resume, duration)
+        plan = generate_interview_plan(parsed_resume, duration, role_profile)
 
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
             """INSERT INTO interview_sessions
-               (candidate_id, interview_plan, status, started_at, duration_minutes, current_topic_index, question_count)
-               VALUES (%s, %s, 'in_progress', NOW(), %s, 0, 0)""",
-            (payload.candidateId, json.dumps(plan), duration),
+               (candidate_id, role_key, interview_plan, status, started_at, duration_minutes, current_topic_index, question_count)
+               VALUES (%s, %s, %s, 'in_progress', NOW(), %s, 0, 0)""",
+            (payload.candidateId, payload.roleKey, json.dumps(plan), duration),
         )
         conn.commit()
         session_id = cursor.lastrowid
@@ -534,7 +545,7 @@ async def submit_answer(
         remaining_seconds = max(0, int(duration_seconds - elapsed_seconds))
         reached_question_cap = session["question_count"] >= MAX_QUESTIONS
 
-        if remaining_seconds <= 0 or reached_question_cap:
+        if reached_question_cap:
             cursor.execute(
                 "UPDATE interview_sessions SET status = 'completed', ended_at = NOW() WHERE id = %s AND status = 'in_progress'",
                 (session_id,),
@@ -794,6 +805,7 @@ def get_report(session_id: int):
         turns = cursor.fetchall()
 
         report = generate_final_report(parsed_resume, turns)
+        report["role_key"] = session.get("role_key")
 
         cursor.execute(
             """INSERT INTO interview_reports
